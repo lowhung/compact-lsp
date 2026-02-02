@@ -66,4 +66,4 @@ tempfile = "3"
 
 # Tree-sitter for parsing
 tree-sitter = "0.25"
-tree-sitter-compact = { path = "../compact-tree-sitter" }
+tree-sitter-compact = { git = "https://github.com/midnightntwrk/compact-tree-sitter", branch = "main" }

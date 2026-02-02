@@ -837,6 +837,7 @@ dependencies = [
 [[package]]
 name = "tree-sitter-compact"
 version = "0.1.0"
+source = "git+https://github.com/midnightntwrk/compact-tree-sitter?branch=main#65b139912de9103bd757fe46bf26d67de1ed7136"
 dependencies = [
  "cc",
  "tree-sitter-language",
