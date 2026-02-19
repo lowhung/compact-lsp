@@ -11,6 +11,7 @@
 mod builtins;
 mod imports;
 mod state;
+mod stdlib;
 mod utils;
 mod validation;
 mod workspace;
@@ -844,9 +845,6 @@ impl LanguageServer for CompactLanguageServer {
             ("MerkleTree", "Merkle tree for ledger state"),
             ("HistoricMerkleTree", "Historic Merkle tree with root history"),
             ("Kernel", "Built-in kernel operations"),
-            ("ContractAddress", "Contract address type"),
-            ("CoinInfo", "Coin information type"),
-            ("MerkleTreeDigest", "Merkle tree root digest"),
             ("Address", "Blockchain address type"),
             ("Void", "Void return type"),
         ];
@@ -881,6 +879,53 @@ impl LanguageServer for CompactLanguageServer {
                 kind: Some(CompletionItemKind::SNIPPET),
                 detail: Some(detail.to_string()),
                 insert_text: Some(snippet.to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+        }
+
+        // Stdlib struct types
+        for st in stdlib::all_stdlib_structs() {
+            let label = if st.type_params.is_empty() {
+                st.name.to_string()
+            } else {
+                st.name.to_string()
+            };
+            items.push(CompletionItem {
+                label,
+                kind: Some(CompletionItemKind::STRUCT),
+                detail: Some(st.description.to_string()),
+                insert_text: Some(st.name.to_string()),
+                ..Default::default()
+            });
+        }
+
+        // Stdlib parameterized type snippets
+        let stdlib_type_snippets = [
+            ("Maybe<>", "Maybe<${1:T}>", "Optional container (Maybe<T>)"),
+            ("Either<>", "Either<${1:A}, ${2:B}>", "Union type (Either<A, B>)"),
+            ("MerkleTreePath<>", "MerkleTreePath<${1:n}, ${2:T}>", "Merkle tree path proof"),
+        ];
+
+        for (label, snippet, detail) in stdlib_type_snippets {
+            items.push(CompletionItem {
+                label: label.to_string(),
+                kind: Some(CompletionItemKind::SNIPPET),
+                detail: Some(detail.to_string()),
+                insert_text: Some(snippet.to_string()),
+                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+        }
+
+        // Stdlib circuit functions
+        for circ in stdlib::all_stdlib_circuits() {
+            items.push(CompletionItem {
+                label: circ.name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(circ.signature.to_string()),
+                documentation: Some(Documentation::String(circ.doc.to_string())),
+                insert_text: Some(circ.snippet.to_string()),
                 insert_text_format: Some(InsertTextFormat::SNIPPET),
                 ..Default::default()
             });
@@ -1080,6 +1125,51 @@ impl LanguageServer for CompactLanguageServer {
             }));
         }
 
+        // Stdlib circuit hover (e.g., hovering on "send")
+        if let Some(circ) = stdlib::find_stdlib_circuit(&word) {
+            let mut hover_text = format!("```compact\ncircuit {}\n```\n\n{}", circ.signature, circ.doc);
+            if !circ.doc_url.is_empty() {
+                hover_text.push_str(&format!(
+                    "\n\n> [Compact Standard Library]({})",
+                    circ.doc_url
+                ));
+            }
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: hover_text,
+                }),
+                range: None,
+            }));
+        }
+
+        // Stdlib struct hover (e.g., hovering on "CoinInfo", "Maybe")
+        let base_type = builtins::extract_base_type(&word);
+        if let Some(st) = stdlib::find_stdlib_struct(base_type) {
+            let mut hover_text = if st.type_params.is_empty() {
+                format!("**{}**\n\n{}\n\n", st.name, st.description)
+            } else {
+                format!("**{}{}**\n\n{}\n\n", st.name, st.type_params, st.description)
+            };
+            hover_text.push_str("**Fields:**\n");
+            for field in &st.fields {
+                hover_text.push_str(&format!("- `{}: {}` — {}\n", field.name, field.type_str, field.doc));
+            }
+            if !st.doc_url.is_empty() {
+                hover_text.push_str(&format!(
+                    "\n> [Compact Standard Library]({})",
+                    st.doc_url
+                ));
+            }
+            return Ok(Some(Hover {
+                contents: HoverContents::Markup(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: hover_text,
+                }),
+                range: None,
+            }));
+        }
+
         Ok(None)
     }
 
@@ -1105,6 +1195,38 @@ impl LanguageServer for CompactLanguageServer {
             })));
         }
 
+        // Check for member access on built-in types (e.g., "increment" in "round.increment()")
+        let member_ctx = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            parser.get_member_access_context(&content, position.line, position.character)
+        };
+        if let Some(ctx) = member_ctx {
+            let var_type = {
+                let mut parser = self.parser_engine.lock().unwrap();
+                parser.get_variable_type(&content, &ctx.base_name)
+            };
+            // Fallback: `kernel` is implicitly available without a ledger declaration
+            let var_type = var_type.or_else(|| {
+                if ctx.base_name == "kernel" { Some("Kernel".to_string()) } else { None }
+            });
+            if let Some(type_str) = var_type {
+                let base_type = builtins::extract_base_type(&type_str);
+                if let Some(doc_loc) = builtins::get_builtin_method_doc_location(base_type, &ctx.member_name) {
+                    let target_uri = match Uri::from_str(&doc_loc.uri) {
+                        Ok(u) => u,
+                        Err(_) => return Ok(None),
+                    };
+                    return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                        uri: target_uri,
+                        range: Range {
+                            start: Position { line: doc_loc.line, character: 0 },
+                            end: Position { line: doc_loc.line, character: 0 },
+                        },
+                    })));
+                }
+            }
+        }
+
         let word = match utils::get_word_at_position(&content, position.line, position.character) {
             Some(w) => w,
             None => return Ok(None),
@@ -1124,6 +1246,52 @@ impl LanguageServer for CompactLanguageServer {
                     },
                 })));
             }
+        }
+
+        // Built-in type name lookup (e.g., "Counter" in "ledger round: Counter;")
+        let base_type = builtins::extract_base_type(&word);
+        if let Some(doc_loc) = builtins::get_builtin_type_doc_location(base_type) {
+            let target_uri = match Uri::from_str(&doc_loc.uri) {
+                Ok(u) => u,
+                Err(_) => return Ok(None),
+            };
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: target_uri,
+                range: Range {
+                    start: Position { line: doc_loc.line, character: 0 },
+                    end: Position { line: doc_loc.line, character: 0 },
+                },
+            })));
+        }
+
+        // Stdlib struct type lookup (e.g., "CoinInfo", "Maybe<T>")
+        if let Some(doc_loc) = stdlib::get_stdlib_struct_doc_location(base_type) {
+            let target_uri = match Uri::from_str(&doc_loc.uri) {
+                Ok(u) => u,
+                Err(_) => return Ok(None),
+            };
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: target_uri,
+                range: Range {
+                    start: Position { line: doc_loc.line, character: 0 },
+                    end: Position { line: doc_loc.line, character: 0 },
+                },
+            })));
+        }
+
+        // Stdlib circuit function lookup (e.g., "send", "transientHash")
+        if let Some(doc_loc) = stdlib::get_stdlib_circuit_doc_location(&word) {
+            let target_uri = match Uri::from_str(&doc_loc.uri) {
+                Ok(u) => u,
+                Err(_) => return Ok(None),
+            };
+            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
+                uri: target_uri,
+                range: Range {
+                    start: Position { line: doc_loc.line, character: 0 },
+                    end: Position { line: doc_loc.line, character: 0 },
+                },
+            })));
         }
 
         Ok(None)
@@ -1184,6 +1352,41 @@ impl LanguageServer for CompactLanguageServer {
                     active_parameter: Some(active_param),
                 }));
             }
+        }
+
+        // Stdlib circuit function signature help
+        if let Some(circ) = stdlib::find_stdlib_circuit(&func_name) {
+            let active_param = utils::count_commas_before_cursor(&content, position.line, position.character);
+            // Build detail string from signature: "send(input: QualifiedCoinInfo, ...): SendResult" → "(input: QualifiedCoinInfo, ...): SendResult"
+            let detail = circ.signature.find('(')
+                .map(|i| &circ.signature[i..])
+                .unwrap_or(circ.signature);
+            let params = utils::parse_params_from_detail(detail);
+
+            let parameters: Vec<ParameterInformation> = params
+                .iter()
+                .map(|p| ParameterInformation {
+                    label: ParameterLabel::Simple(p.clone()),
+                    documentation: None,
+                })
+                .collect();
+
+            let label = format!("circuit {}", circ.signature);
+            let signature = SignatureInformation {
+                label,
+                documentation: Some(Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: circ.doc.to_string(),
+                })),
+                parameters: Some(parameters),
+                active_parameter: Some(active_param),
+            };
+
+            return Ok(Some(SignatureHelp {
+                signatures: vec![signature],
+                active_signature: Some(0),
+                active_parameter: Some(active_param),
+            }));
         }
 
         Ok(None)

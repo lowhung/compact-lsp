@@ -12,6 +12,8 @@
 
 [[types]]
 name = "Counter"
+description = "Simple incrementing/decrementing counter for ledger state."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "increment"
@@ -47,6 +49,8 @@ doc = "Reset the counter to zero."
 
 [[types]]
 name = "Cell"
+description = "Mutable single-value container for ledger state."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "read"
@@ -61,6 +65,12 @@ snippet = "write(${1:value})"
 doc = "Overwrite the cell contents."
 
 [[types.methods]]
+name = "writeCoin"
+signature = "writeCoin(coin: CoinInfo, recipient: Either<ZswapCoinPublicKey, ContractAddress>)"
+snippet = "writeCoin(${1:coin}, ${2:recipient})"
+doc = "Write a coin value to the cell, transferring the coin to the recipient."
+
+[[types.methods]]
 name = "resetToDefault"
 signature = "resetToDefault()"
 snippet = "resetToDefault()"
@@ -70,6 +80,8 @@ doc = "Reset to the type's default value."
 
 [[types]]
 name = "Map"
+description = "Key-value mapping for ledger state."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "insert"
@@ -82,6 +94,12 @@ name = "insertDefault"
 signature = "insertDefault(key: K)"
 snippet = "insertDefault(${1:key})"
 doc = "Insert a key with the value type's default value."
+
+[[types.methods]]
+name = "insertCoin"
+signature = "insertCoin(key: K, coin: CoinInfo, recipient: Either<ZswapCoinPublicKey, ContractAddress>)"
+snippet = "insertCoin(${1:key}, ${2:coin}, ${3:recipient})"
+doc = "Insert a key with a coin value, transferring the coin to the recipient."
 
 [[types.methods]]
 name = "remove"
@@ -123,12 +141,20 @@ doc = "Clear the map to empty."
 
 [[types]]
 name = "Set"
+description = "Unordered collection of unique elements for ledger state."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "insert"
 signature = "insert(element: T)"
 snippet = "insert(${1:element})"
 doc = "Add an element to the set."
+
+[[types.methods]]
+name = "insertCoin"
+signature = "insertCoin(coin: CoinInfo, recipient: Either<ZswapCoinPublicKey, ContractAddress>)"
+snippet = "insertCoin(${1:coin}, ${2:recipient})"
+doc = "Insert a coin value into the set, transferring the coin to the recipient."
 
 [[types.methods]]
 name = "remove"
@@ -164,12 +190,20 @@ doc = "Clear the set to empty."
 
 [[types]]
 name = "List"
+description = "Ordered list of elements for ledger state."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "pushFront"
 signature = "pushFront(value: T)"
 snippet = "pushFront(${1:value})"
 doc = "Prepend an element to the front of the list."
+
+[[types.methods]]
+name = "pushFrontCoin"
+signature = "pushFrontCoin(coin: CoinInfo, recipient: Either<ZswapCoinPublicKey, ContractAddress>)"
+snippet = "pushFrontCoin(${1:coin}, ${2:recipient})"
+doc = "Prepend a coin value to the front of the list, transferring the coin to the recipient."
 
 [[types.methods]]
 name = "popFront"
@@ -205,6 +239,8 @@ doc = "Clear the list to empty."
 
 [[types]]
 name = "MerkleTree"
+description = "Append-only Merkle tree for ledger state with membership proofs."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "insert"
@@ -258,6 +294,8 @@ doc = "Clear the tree to empty."
 
 [[types]]
 name = "HistoricMerkleTree"
+description = "Merkle tree with historical root tracking for ledger state."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "insert"
@@ -317,6 +355,8 @@ doc = "Clear history, preserving only the current root."
 
 [[types]]
 name = "Kernel"
+description = "Built-in runtime operations available in all contracts."
+doc_url = "https://docs.midnight.network/develop/reference/compact/ledger-adt"
 
 [[types.methods]]
 name = "self"

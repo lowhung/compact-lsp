@@ -489,9 +489,6 @@ impl ParserEngine {
             "MerkleTree" => "**MerkleTree<N, T>**\n\nMerkle tree for ledger state. Stores leaves and maintains a root hash.\n\n```compact\nledger tree: MerkleTree<32, Bytes<32>>;\n```",
             "HistoricMerkleTree" => "**HistoricMerkleTree<N, T>**\n\nHistoric Merkle tree with root history. Validates roots against any past root.\n\n```compact\nledger tree: HistoricMerkleTree<32, Bytes<32>>;\n```",
             "Kernel" => "**Kernel**\n\nBuilt-in kernel operations available in every contract as `kernel`.\n\nProvides access to contract identity, minting, block time checks, and transaction claims.",
-            "ContractAddress" => "**ContractAddress**\n\nContract address type returned by `kernel.self()`.",
-            "CoinInfo" => "**CoinInfo**\n\nCoin information type for token operations.",
-            "MerkleTreeDigest" => "**MerkleTreeDigest**\n\nMerkle tree root digest used with `checkRoot()`.",
             _ => return None,
         };
         Some(doc.to_string())

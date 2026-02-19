@@ -63,6 +63,14 @@ pub fn is_builtin_type(name: &str) -> bool {
             | "ContractAddress"
             | "CoinInfo"
             | "MerkleTreeDigest"
+            | "Maybe"
+            | "Either"
+            | "CurvePoint"
+            | "MerkleTreePathEntry"
+            | "MerkleTreePath"
+            | "QualifiedCoinInfo"
+            | "ZswapCoinPublicKey"
+            | "SendResult"
     )
 }
 
@@ -130,6 +138,14 @@ mod tests {
         assert!(is_builtin_type("ContractAddress"));
         assert!(is_builtin_type("CoinInfo"));
         assert!(is_builtin_type("MerkleTreeDigest"));
+        assert!(is_builtin_type("Maybe"));
+        assert!(is_builtin_type("Either"));
+        assert!(is_builtin_type("CurvePoint"));
+        assert!(is_builtin_type("MerkleTreePathEntry"));
+        assert!(is_builtin_type("MerkleTreePath"));
+        assert!(is_builtin_type("QualifiedCoinInfo"));
+        assert!(is_builtin_type("ZswapCoinPublicKey"));
+        assert!(is_builtin_type("SendResult"));
     }
 
     #[test]

@@ -1,0 +1,496 @@
+# Compact standard library type and circuit registry.
+#
+# This file defines all struct types and circuit functions available via
+# `import CompactStandardLibrary;`.  It is embedded at compile time
+# (include_str!) and parsed once on first access.
+#
+# Reference: https://docs.midnight.network/develop/reference/compact/compact-std-library/exports
+
+# ── Maybe ────────────────────────────────────────────────────────────
+
+[[structs]]
+name = "Maybe"
+type_params = "<T>"
+description = "Optional container that may or may not hold a value of type T."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "isSome"
+type_str = "Boolean"
+doc = "Whether the container holds a value."
+
+[[structs.fields]]
+name = "value"
+type_str = "T"
+doc = "The contained value (meaningful only when isSome is true)."
+
+# ── Either ───────────────────────────────────────────────────────────
+
+[[structs]]
+name = "Either"
+type_params = "<A, B>"
+description = "Union type that holds a value of type A (left) or type B (right)."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "isLeft"
+type_str = "Boolean"
+doc = "Whether this holds the left variant."
+
+[[structs.fields]]
+name = "left"
+type_str = "A"
+doc = "The left variant value (meaningful only when isLeft is true)."
+
+[[structs.fields]]
+name = "right"
+type_str = "B"
+doc = "The right variant value (meaningful only when isLeft is false)."
+
+# ── CurvePoint ───────────────────────────────────────────────────────
+
+[[structs]]
+name = "CurvePoint"
+type_params = ""
+description = "A point on the elliptic curve used for cryptographic operations."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "x"
+type_str = "Field"
+doc = "The x-coordinate of the curve point."
+
+[[structs.fields]]
+name = "y"
+type_str = "Field"
+doc = "The y-coordinate of the curve point."
+
+# ── MerkleTreeDigest ─────────────────────────────────────────────────
+
+[[structs]]
+name = "MerkleTreeDigest"
+type_params = ""
+description = "Merkle tree root digest used with `checkRoot()` for membership verification."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "field"
+type_str = "Field"
+doc = "The digest value as a field element."
+
+# ── MerkleTreePathEntry ──────────────────────────────────────────────
+
+[[structs]]
+name = "MerkleTreePathEntry"
+type_params = ""
+description = "A single entry in a Merkle tree path proof."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "sibling"
+type_str = "MerkleTreeDigest"
+doc = "The sibling digest at this level of the tree."
+
+[[structs.fields]]
+name = "goesLeft"
+type_str = "Boolean"
+doc = "Whether this node is the left child at this level."
+
+# ── MerkleTreePath ───────────────────────────────────────────────────
+
+[[structs]]
+name = "MerkleTreePath"
+type_params = "<#n, T>"
+description = "A Merkle tree inclusion proof containing the leaf and path entries."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "leaf"
+type_str = "T"
+doc = "The leaf value being proven."
+
+[[structs.fields]]
+name = "path"
+type_str = "Vector<n, MerkleTreePathEntry>"
+doc = "The path from the leaf to the root."
+
+# ── ContractAddress ──────────────────────────────────────────────────
+
+[[structs]]
+name = "ContractAddress"
+type_params = ""
+description = "Contract address type returned by `kernel.self()`."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "bytes"
+type_str = "Bytes<32>"
+doc = "The raw 32-byte contract address."
+
+# ── CoinInfo ─────────────────────────────────────────────────────────
+
+[[structs]]
+name = "CoinInfo"
+type_params = ""
+description = "Coin information type for token operations."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "nonce"
+type_str = "Bytes<32>"
+doc = "Unique nonce for the coin."
+
+[[structs.fields]]
+name = "color"
+type_str = "Bytes<32>"
+doc = "Token type identifier (color)."
+
+[[structs.fields]]
+name = "value"
+type_str = "Uint<128>"
+doc = "The coin value (amount)."
+
+# ── QualifiedCoinInfo ────────────────────────────────────────────────
+
+[[structs]]
+name = "QualifiedCoinInfo"
+type_params = ""
+description = "Coin information with a Merkle tree index, representing a coin stored in the ledger."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "nonce"
+type_str = "Bytes<32>"
+doc = "Unique nonce for the coin."
+
+[[structs.fields]]
+name = "color"
+type_str = "Bytes<32>"
+doc = "Token type identifier (color)."
+
+[[structs.fields]]
+name = "value"
+type_str = "Uint<128>"
+doc = "The coin value (amount)."
+
+[[structs.fields]]
+name = "mtIndex"
+type_str = "Uint<64>"
+doc = "Index of the coin in the Merkle tree."
+
+# ── ZswapCoinPublicKey ───────────────────────────────────────────────
+
+[[structs]]
+name = "ZswapCoinPublicKey"
+type_params = ""
+description = "Public key for Zswap coin operations, identifying a coin recipient."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "bytes"
+type_str = "Bytes<32>"
+doc = "The raw 32-byte public key."
+
+# ── SendResult ───────────────────────────────────────────────────────
+
+[[structs]]
+name = "SendResult"
+type_params = ""
+description = "Result of a send operation, containing change and the sent coin."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[structs.fields]]
+name = "change"
+type_str = "Maybe<CoinInfo>"
+doc = "Change coin returned to the sender, if any."
+
+[[structs.fields]]
+name = "sent"
+type_str = "CoinInfo"
+doc = "The coin that was sent to the recipient."
+
+# ═══════════════════════════════════════════════════════════════════════
+# Circuit Functions
+# ═══════════════════════════════════════════════════════════════════════
+
+# ── Optional constructors ────────────────────────────────────────────
+
+[[circuits]]
+name = "some"
+type_params = "<T>"
+signature = "some<T>(value: T): Maybe<T>"
+snippet = "some(${1:value})"
+doc = "Construct an optional container holding the given value."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "none"
+type_params = "<T>"
+signature = "none<T>(): Maybe<T>"
+snippet = "none()"
+doc = "Construct an empty optional container."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Either constructors ──────────────────────────────────────────────
+
+[[circuits]]
+name = "left"
+type_params = "<A, B>"
+signature = "left<A, B>(value: A): Either<A, B>"
+snippet = "left(${1:value})"
+doc = "Construct the left variant of a union type."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "right"
+type_params = "<A, B>"
+signature = "right<A, B>(value: B): Either<A, B>"
+snippet = "right(${1:value})"
+doc = "Construct the right variant of a union type."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Hash and commitment ──────────────────────────────────────────────
+
+[[circuits]]
+name = "transientHash"
+type_params = "<T>"
+signature = "transientHash<T>(value: T): Field"
+snippet = "transientHash(${1:value})"
+doc = "Circuit-efficient hash. Output is not guaranteed to be persistent across compiler versions."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "transientCommit"
+type_params = "<T>"
+signature = "transientCommit<T>(value: T, rand: Field): Field"
+snippet = "transientCommit(${1:value}, ${2:rand})"
+doc = "Circuit-efficient commitment function. Not guaranteed persistent across compiler versions."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "persistentHash"
+type_params = "<T>"
+signature = "persistentHash<T>(value: T): Bytes<32>"
+snippet = "persistentHash(${1:value})"
+doc = "SHA-256 hash function. Output is guaranteed persistent across compiler versions."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "persistentCommit"
+type_params = "<T>"
+signature = "persistentCommit<T>(value: T, rand: Bytes<32>): Bytes<32>"
+snippet = "persistentCommit(${1:value}, ${2:rand})"
+doc = "SHA-256 commitment function. Output is guaranteed persistent across compiler versions."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "degradeToTransient"
+type_params = ""
+signature = "degradeToTransient(x: Bytes<32>): Field"
+snippet = "degradeToTransient(${1:x})"
+doc = "Convert a persistent output (Bytes<32>) to a transient field element."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "upgradeFromTransient"
+type_params = ""
+signature = "upgradeFromTransient(x: Field): Bytes<32>"
+snippet = "upgradeFromTransient(${1:x})"
+doc = "Convert a transient field element back to a persistent output (Bytes<32>)."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Elliptic curve operations ────────────────────────────────────────
+
+[[circuits]]
+name = "ecAdd"
+type_params = ""
+signature = "ecAdd(a: CurvePoint, b: CurvePoint): CurvePoint"
+snippet = "ecAdd(${1:a}, ${2:b})"
+doc = "Elliptic curve point addition."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "ecMul"
+type_params = ""
+signature = "ecMul(a: CurvePoint, b: Field): CurvePoint"
+snippet = "ecMul(${1:a}, ${2:b})"
+doc = "Elliptic curve scalar multiplication."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "ecMulGenerator"
+type_params = ""
+signature = "ecMulGenerator(b: Field): CurvePoint"
+snippet = "ecMulGenerator(${1:b})"
+doc = "Multiply the generator point by a scalar."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "hashToCurve"
+type_params = "<T>"
+signature = "hashToCurve<T>(value: T): CurvePoint"
+snippet = "hashToCurve(${1:value})"
+doc = "Map an arbitrary type to an elliptic curve point."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Merkle tree path operations ──────────────────────────────────────
+
+[[circuits]]
+name = "merkleTreePathRoot"
+type_params = "<#n, T>"
+signature = "merkleTreePathRoot<#n, T>(path: MerkleTreePath<n, T>): MerkleTreeDigest"
+snippet = "merkleTreePathRoot(${1:path})"
+doc = "Derive the Merkle tree root from a path proof."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "merkleTreePathRootNoLeafHash"
+type_params = "<#n>"
+signature = "merkleTreePathRootNoLeafHash<#n>(path: MerkleTreePath<n, Bytes<32>>): MerkleTreeDigest"
+snippet = "merkleTreePathRootNoLeafHash(${1:path})"
+doc = "Derive the Merkle tree root from a path proof, assuming the leaf is already hashed."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Token operations ─────────────────────────────────────────────────
+
+[[circuits]]
+name = "nativeToken"
+type_params = ""
+signature = "nativeToken(): Bytes<32>"
+snippet = "nativeToken()"
+doc = "Return the native token type identifier."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "tokenType"
+type_params = ""
+signature = "tokenType(domainSep: Bytes<32>, contract: ContractAddress): Bytes<32>"
+snippet = "tokenType(${1:domainSep}, ${2:contract})"
+doc = "Generate a namespaced token type from a domain separator and contract address."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "mintToken"
+type_params = ""
+signature = "mintToken(domainSep: Bytes<32>, value: Uint<128>, nonce: Bytes<32>, recipient: Either<ZswapCoinPublicKey, ContractAddress>): CoinInfo"
+snippet = "mintToken(${1:domainSep}, ${2:value}, ${3:nonce}, ${4:recipient})"
+doc = "Create a new shielded coin with the given properties."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "evolveNonce"
+type_params = ""
+signature = "evolveNonce(index: Uint<64>, nonce: Bytes<32>): Bytes<32>"
+snippet = "evolveNonce(${1:index}, ${2:nonce})"
+doc = "Deterministically derive a new nonce from a counter index and existing nonce."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Coin transfer operations ─────────────────────────────────────────
+
+[[circuits]]
+name = "burnAddress"
+type_params = ""
+signature = "burnAddress(): Either<ZswapCoinPublicKey, ContractAddress>"
+snippet = "burnAddress()"
+doc = "Return the burn payment address (coins sent here are destroyed)."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "receive"
+type_params = ""
+signature = "receive(coin: CoinInfo): []"
+snippet = "receive(${1:coin})"
+doc = "Receive a shielded coin with validation."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "send"
+type_params = ""
+signature = "send(input: QualifiedCoinInfo, recipient: Either<ZswapCoinPublicKey, ContractAddress>, value: Uint<128>): SendResult"
+snippet = "send(${1:input}, ${2:recipient}, ${3:value})"
+doc = "Send coins from a ledger coin. Returns a SendResult with optional change."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "sendImmediate"
+type_params = ""
+signature = "sendImmediate(input: CoinInfo, target: Either<ZswapCoinPublicKey, ContractAddress>, value: Uint<128>): SendResult"
+snippet = "sendImmediate(${1:input}, ${2:target}, ${3:value})"
+doc = "Send coins from a transaction-created coin. Returns a SendResult with optional change."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "mergeCoin"
+type_params = ""
+signature = "mergeCoin(a: QualifiedCoinInfo, b: QualifiedCoinInfo): CoinInfo"
+snippet = "mergeCoin(${1:a}, ${2:b})"
+doc = "Combine two ledger coins of the same token type into one."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "mergeCoinImmediate"
+type_params = ""
+signature = "mergeCoinImmediate(a: QualifiedCoinInfo, b: CoinInfo): CoinInfo"
+snippet = "mergeCoinImmediate(${1:a}, ${2:b})"
+doc = "Combine a ledger coin with a transaction-created coin of the same token type."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Zswap operations ─────────────────────────────────────────────────
+
+[[circuits]]
+name = "ownPublicKey"
+type_params = ""
+signature = "ownPublicKey(): ZswapCoinPublicKey"
+snippet = "ownPublicKey()"
+doc = "Return the transaction creator's Zswap public key."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "createZswapInput"
+type_params = ""
+signature = "createZswapInput(coin: QualifiedCoinInfo): []"
+snippet = "createZswapInput(${1:coin})"
+doc = "Create a Zswap input notification for coin spending."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "createZswapOutput"
+type_params = ""
+signature = "createZswapOutput(coin: CoinInfo, recipient: Either<ZswapCoinPublicKey, ContractAddress>): []"
+snippet = "createZswapOutput(${1:coin}, ${2:recipient})"
+doc = "Create a Zswap output notification for coin receiving."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+# ── Block time operations ────────────────────────────────────────────
+
+[[circuits]]
+name = "blockTimeLt"
+type_params = ""
+signature = "blockTimeLt(time: Uint<64>): Boolean"
+snippet = "blockTimeLt(${1:time})"
+doc = "Check if the current block time is less than the given value."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "blockTimeGte"
+type_params = ""
+signature = "blockTimeGte(time: Uint<64>): Boolean"
+snippet = "blockTimeGte(${1:time})"
+doc = "Check if the current block time is greater than or equal to the given value."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "blockTimeGt"
+type_params = ""
+signature = "blockTimeGt(time: Uint<64>): Boolean"
+snippet = "blockTimeGt(${1:time})"
+doc = "Check if the current block time is greater than the given value."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
+
+[[circuits]]
+name = "blockTimeLte"
+type_params = ""
+signature = "blockTimeLte(time: Uint<64>): Boolean"
+snippet = "blockTimeLte(${1:time})"
+doc = "Check if the current block time is less than or equal to the given value."
+doc_url = "https://docs.midnight.network/develop/reference/compact/compact-std-library/exports"
