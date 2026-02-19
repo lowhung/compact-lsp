@@ -136,6 +136,17 @@ pub enum SemanticTokenModifier {
     DefaultLibrary = 2,
 }
 
+/// Context from a member access expression (e.g., `round.increment`).
+#[derive(Debug, Clone)]
+pub struct MemberAccessContext {
+    /// The base identifier name (e.g., "round").
+    pub base_name: String,
+    /// The member identifier name (e.g., "increment").
+    pub member_name: String,
+    /// The range of the member identifier.
+    pub member_range: Range,
+}
+
 /// A reference location for Find References.
 #[derive(Debug, Clone)]
 pub struct ReferenceLocation {

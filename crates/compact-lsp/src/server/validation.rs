@@ -57,6 +57,12 @@ pub fn is_builtin_type(name: &str) -> bool {
             | "Set"
             | "Cell"
             | "Address"
+            | "List"
+            | "MerkleTree"
+            | "HistoricMerkleTree"
+            | "ContractAddress"
+            | "CoinInfo"
+            | "MerkleTreeDigest"
     )
 }
 
@@ -118,6 +124,12 @@ mod tests {
         assert!(is_builtin_type("Set"));
         assert!(is_builtin_type("Cell"));
         assert!(is_builtin_type("Address"));
+        assert!(is_builtin_type("List"));
+        assert!(is_builtin_type("MerkleTree"));
+        assert!(is_builtin_type("HistoricMerkleTree"));
+        assert!(is_builtin_type("ContractAddress"));
+        assert!(is_builtin_type("CoinInfo"));
+        assert!(is_builtin_type("MerkleTreeDigest"));
     }
 
     #[test]

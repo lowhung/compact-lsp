@@ -212,6 +212,108 @@ pub fn parse_params_from_detail(detail: &str) -> Vec<String> {
         .collect()
 }
 
+/// Detect dot-completion context by scanning backwards from cursor.
+///
+/// Unlike `get_dot_access_variable` (which requires cursor immediately after the dot),
+/// this handles partial identifiers after the dot (e.g., `round.inc|` returns `Some("round")`).
+/// Works for both `round.|` and `round.inc|` positions.
+pub fn detect_dot_context(content: &str, line: u32, character: u32) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let line_content = lines.get(line as usize)?;
+    let char_idx = character as usize;
+
+    if char_idx > line_content.len() {
+        return None;
+    }
+
+    let chars: Vec<char> = line_content.chars().collect();
+
+    // Skip backwards over any partial identifier (e.g., the "inc" in "round.inc|")
+    let mut idx = char_idx;
+    while idx > 0 {
+        let c = chars.get(idx - 1)?;
+        if c.is_alphanumeric() || *c == '_' {
+            idx -= 1;
+        } else {
+            break;
+        }
+    }
+
+    // Now check if there's a dot
+    if idx == 0 {
+        return None;
+    }
+    if chars.get(idx - 1).copied() != Some('.') {
+        return None;
+    }
+    let dot_idx = idx - 1;
+
+    if dot_idx == 0 {
+        return None;
+    }
+
+    // Scan backwards from before the dot to find the base identifier
+    let end = dot_idx;
+    let mut start = end;
+    while start > 0 {
+        let c = chars.get(start - 1)?;
+        if c.is_alphanumeric() || *c == '_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if start == end {
+        return None;
+    }
+
+    Some(chars[start..end].iter().collect())
+}
+
+/// Get the variable name before a dot at the cursor position.
+///
+/// If the cursor is right after `round.`, this returns `Some("round")`.
+pub fn get_dot_access_variable(content: &str, line: u32, character: u32) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let line_content = lines.get(line as usize)?;
+    let char_idx = character as usize;
+
+    if char_idx == 0 {
+        return None;
+    }
+
+    let chars: Vec<char> = line_content.chars().collect();
+
+    // The character before the cursor should be '.'
+    let dot_idx = char_idx - 1;
+    if chars.get(dot_idx).copied() != Some('.') {
+        return None;
+    }
+
+    if dot_idx == 0 {
+        return None;
+    }
+
+    // Scan backwards from before the dot to find the identifier
+    let end = dot_idx;
+    let mut start = end;
+    while start > 0 {
+        let c = chars.get(start - 1)?;
+        if c.is_alphanumeric() || *c == '_' {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    if start == end {
+        return None;
+    }
+
+    Some(chars[start..end].iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -277,5 +379,97 @@ mod tests {
         let detail = "(): Void";
         let params = parse_params_from_detail(detail);
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_get_dot_access_variable() {
+        // "round." with cursor at position 6 (after the dot)
+        let content = "round.";
+        assert_eq!(
+            get_dot_access_variable(content, 0, 6),
+            Some("round".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_dot_access_variable_in_context() {
+        let content = "    round.";
+        assert_eq!(
+            get_dot_access_variable(content, 0, 10),
+            Some("round".to_string())
+        );
+    }
+
+    #[test]
+    fn test_get_dot_access_variable_no_dot() {
+        let content = "round";
+        assert_eq!(get_dot_access_variable(content, 0, 5), None);
+    }
+
+    #[test]
+    fn test_get_dot_access_variable_no_identifier() {
+        let content = ".";
+        assert_eq!(get_dot_access_variable(content, 0, 1), None);
+    }
+
+    #[test]
+    fn test_detect_dot_context_right_after_dot() {
+        // "round." with cursor at position 6 (after the dot)
+        let content = "round.";
+        assert_eq!(
+            detect_dot_context(content, 0, 6),
+            Some("round".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_dot_context_partial_identifier() {
+        // "round.inc" with cursor at position 9 (after "inc")
+        let content = "round.inc";
+        assert_eq!(
+            detect_dot_context(content, 0, 9),
+            Some("round".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_dot_context_mid_partial() {
+        // "round.increment" with cursor in middle of "increment"
+        let content = "round.increment";
+        assert_eq!(
+            detect_dot_context(content, 0, 8),
+            Some("round".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_dot_context_indented() {
+        let content = "    round.inc";
+        assert_eq!(
+            detect_dot_context(content, 0, 13),
+            Some("round".to_string())
+        );
+    }
+
+    #[test]
+    fn test_detect_dot_context_no_dot() {
+        let content = "round";
+        assert_eq!(detect_dot_context(content, 0, 5), None);
+    }
+
+    #[test]
+    fn test_detect_dot_context_no_base() {
+        let content = ".inc";
+        assert_eq!(detect_dot_context(content, 0, 4), None);
+    }
+
+    #[test]
+    fn test_detect_dot_context_multiline() {
+        let content = "ledger round: Counter;\nexport circuit incr(): [] {\n  round.increment(1);\n}";
+        // Line 2: "  round.increment(1);" - cursor on "increment" at col 8
+        assert_eq!(
+            detect_dot_context(content, 2, 8),
+            Some("round".to_string())
+        );
     }
 }

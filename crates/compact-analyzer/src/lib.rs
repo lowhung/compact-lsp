@@ -17,6 +17,6 @@ pub use diagnostics::DiagnosticEngine;
 pub use formatter::FormatterEngine;
 pub use parser::{
     CompletionSymbol, CompletionSymbolKind, DefinitionLocation, HoverInfo, ImportInfo,
-    ParameterInfo, ParserEngine, ReferenceLocation, SemanticToken, SemanticTokenModifier,
-    SemanticTokenType, SignatureInfo, SymbolLocation, SyntaxError,
+    MemberAccessContext, ParameterInfo, ParserEngine, ReferenceLocation, SemanticToken,
+    SemanticTokenModifier, SemanticTokenType, SignatureInfo, SymbolLocation, SyntaxError,
 };

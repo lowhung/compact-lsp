@@ -485,6 +485,13 @@ impl ParserEngine {
             "Counter" => "**Counter**\n\nAtomic counter for ledger state.\n\n```compact\nledger nonce: Counter;\n```",
             "Address" => "**Address**\n\nBlockchain address type.\n\n```compact\nconst recipient: Address = ...;\n```",
             "Cell" => "**Cell<T>**\n\nMutable cell for ledger state.\n\n```compact\nledger value: Cell<Field>;\n```",
+            "List" => "**List<T>**\n\nOrdered list for ledger state. Supports prepend/pop from the front.\n\n```compact\nledger items: List<Field>;\n```",
+            "MerkleTree" => "**MerkleTree<N, T>**\n\nMerkle tree for ledger state. Stores leaves and maintains a root hash.\n\n```compact\nledger tree: MerkleTree<32, Bytes<32>>;\n```",
+            "HistoricMerkleTree" => "**HistoricMerkleTree<N, T>**\n\nHistoric Merkle tree with root history. Validates roots against any past root.\n\n```compact\nledger tree: HistoricMerkleTree<32, Bytes<32>>;\n```",
+            "Kernel" => "**Kernel**\n\nBuilt-in kernel operations available in every contract as `kernel`.\n\nProvides access to contract identity, minting, block time checks, and transaction claims.",
+            "ContractAddress" => "**ContractAddress**\n\nContract address type returned by `kernel.self()`.",
+            "CoinInfo" => "**CoinInfo**\n\nCoin information type for token operations.",
+            "MerkleTreeDigest" => "**MerkleTreeDigest**\n\nMerkle tree root digest used with `checkRoot()`.",
             _ => return None,
         };
         Some(doc.to_string())
@@ -1649,6 +1656,103 @@ impl ParserEngine {
             prefix,
         })
     }
+
+    /// Get member access context at a cursor position.
+    ///
+    /// If the cursor is on `increment` in `round.increment(1)`, returns
+    /// `MemberAccessContext { base_name: "round", member_name: "increment", ... }`.
+    pub fn get_member_access_context(
+        &mut self,
+        source: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<MemberAccessContext> {
+        let tree = self.parse(source)?;
+        let root = tree.root_node();
+        let source_bytes = source.as_bytes();
+
+        let point = tree_sitter::Point {
+            row: line as usize,
+            column: character as usize,
+        };
+
+        // Find the deepest node at this position
+        let node = root.descendant_for_point_range(point, point)?;
+
+        // The node should be an identifier
+        if node.kind() != "id" {
+            return None;
+        }
+
+        // Its parent should be a member_access_expr
+        let parent = node.parent()?;
+        if parent.kind() != "member_access_expr" {
+            return None;
+        }
+
+        // Verify this node is the member field (not the base)
+        let member_node = parent.child_by_field_name("member")?;
+        if member_node.id() != node.id() {
+            return None;
+        }
+
+        // Extract the base identifier
+        let base_node = parent.child_by_field_name("base")?;
+        let base_name = self.extract_base_identifier(base_node, source_bytes)?;
+        let member_name = self.node_text(node, source_bytes);
+        let member_range = self.node_range(node);
+
+        Some(MemberAccessContext {
+            base_name,
+            member_name,
+            member_range,
+        })
+    }
+
+    /// Extract the identifier name from a base expression node.
+    ///
+    /// For simple identifiers this returns the text directly.
+    /// For more complex expressions, tries to find an `id` child.
+    fn extract_base_identifier(&self, node: Node, source: &[u8]) -> Option<String> {
+        if node.kind() == "id" {
+            return Some(self.node_text(node, source));
+        }
+        // For expression nodes, try to find an id child
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() == "id" {
+                return Some(self.node_text(child, source));
+            }
+        }
+        None
+    }
+
+    /// Look up the type of a variable by name (searches ledger declarations).
+    pub fn get_variable_type(&mut self, source: &str, variable_name: &str) -> Option<String> {
+        let tree = self.parse(source)?;
+        let source_bytes = source.as_bytes();
+        self.find_variable_type(tree.root_node(), source_bytes, variable_name)
+    }
+
+    /// Recursively search AST for a ledger declaration matching the variable name.
+    fn find_variable_type(&self, node: Node, source: &[u8], variable_name: &str) -> Option<String> {
+        if node.kind() == "ldecl" {
+            if let Some(name) = self.get_field_text(node, "name", source) {
+                if name == variable_name {
+                    return self.get_field_text(node, "type", source);
+                }
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if let Some(result) = self.find_variable_type(child, source, variable_name) {
+                return Some(result);
+            }
+        }
+
+        None
+    }
 }
 
 /// Check if a type name is a Compact built-in type.
@@ -1667,6 +1771,12 @@ fn is_builtin_type(name: &str) -> bool {
             | "Set"
             | "Cell"
             | "Address"
+            | "List"
+            | "MerkleTree"
+            | "HistoricMerkleTree"
+            | "ContractAddress"
+            | "CoinInfo"
+            | "MerkleTreeDigest"
     )
 }
 

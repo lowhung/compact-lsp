@@ -8,6 +8,7 @@
 //! 4. Normal operation: file events, requests flow both directions
 //! 5. Editor sends `shutdown` request, we respond, then `exit` notification
 
+mod builtins;
 mod imports;
 mod state;
 mod utils;
@@ -650,8 +651,65 @@ impl LanguageServer for CompactLanguageServer {
         &self,
         params: CompletionParams,
     ) -> Result<Option<CompletionResponse>> {
-        let mut items = Vec::new();
         let uri = params.text_document_position.text_document.uri.to_string();
+        let position = params.text_document_position.position;
+
+        // Handle dot-completion for built-in type methods.
+        // Detect dot context via trigger character OR by scanning the text.
+        let is_dot_trigger = params
+            .context
+            .as_ref()
+            .and_then(|ctx| ctx.trigger_character.as_deref())
+            == Some(".");
+
+        if let Some(doc) = self.documents.get(&uri) {
+            let content = doc.content.to_string();
+
+            // Try trigger-character-based detection first, then text-based fallback
+            let var_name = if is_dot_trigger {
+                tracing::debug!("Dot completion: trigger character detected");
+                utils::get_dot_access_variable(&content, position.line, position.character)
+            } else {
+                tracing::debug!("Dot completion: checking text context");
+                utils::detect_dot_context(&content, position.line, position.character)
+            };
+
+            if let Some(var_name) = var_name {
+                tracing::debug!("Dot completion: base variable = {}", var_name);
+                let var_type = {
+                    let mut parser = self.parser_engine.lock().unwrap();
+                    parser.get_variable_type(&content, &var_name)
+                };
+                // Fallback: `kernel` is implicitly available without a ledger declaration
+                let var_type = var_type.or_else(|| {
+                    if var_name == "kernel" { Some("Kernel".to_string()) } else { None }
+                });
+                if let Some(type_str) = var_type {
+                    let base_type = builtins::extract_base_type(&type_str);
+                    tracing::debug!("Dot completion: resolved type = {}", base_type);
+                    let methods = builtins::methods_for_type(base_type);
+                    if !methods.is_empty() {
+                        let items: Vec<CompletionItem> = methods
+                            .iter()
+                            .map(|m| CompletionItem {
+                                label: m.name.to_string(),
+                                kind: Some(CompletionItemKind::METHOD),
+                                detail: Some(m.signature.to_string()),
+                                documentation: Some(Documentation::String(
+                                    m.documentation.to_string(),
+                                )),
+                                insert_text: Some(m.snippet.to_string()),
+                                insert_text_format: Some(InsertTextFormat::SNIPPET),
+                                ..Default::default()
+                            })
+                            .collect();
+                        return Ok(Some(CompletionResponse::Array(items)));
+                    }
+                }
+            }
+        }
+
+        let mut items = Vec::new();
 
         fn symbol_to_lsp_kind(kind: compact_analyzer::CompletionSymbolKind) -> CompletionItemKind {
             use compact_analyzer::CompletionSymbolKind;
@@ -778,6 +836,19 @@ impl LanguageServer for CompactLanguageServer {
             ("Bytes", "Fixed-size byte array"),
             ("Opaque", "Opaque type wrapper"),
             ("Vector", "Fixed-size vector"),
+            ("Counter", "Atomic counter for ledger state"),
+            ("Map", "Key-value mapping for ledger state"),
+            ("Set", "Set collection for ledger state"),
+            ("Cell", "Mutable cell for ledger state"),
+            ("List", "Ordered list for ledger state"),
+            ("MerkleTree", "Merkle tree for ledger state"),
+            ("HistoricMerkleTree", "Historic Merkle tree with root history"),
+            ("Kernel", "Built-in kernel operations"),
+            ("ContractAddress", "Contract address type"),
+            ("CoinInfo", "Coin information type"),
+            ("MerkleTreeDigest", "Merkle tree root digest"),
+            ("Address", "Blockchain address type"),
+            ("Void", "Void return type"),
         ];
 
         for (type_name, detail) in types {
@@ -796,6 +867,12 @@ impl LanguageServer for CompactLanguageServer {
             ("Bytes<>", "Bytes<${1:32}>", "Byte array (e.g., Bytes<32>)"),
             ("Vector<>", "Vector<${1:10}, ${2:Field}>", "Vector (e.g., Vector<10, Field>)"),
             ("Opaque<>", "Opaque<\"${1:name}\">", "Opaque type (e.g., Opaque<\"mytype\">)"),
+            ("Map<>", "Map<${1:Key}, ${2:Value}>", "Map (e.g., Map<Address, Uint<64>>)"),
+            ("Set<>", "Set<${1:T}>", "Set (e.g., Set<Address>)"),
+            ("Cell<>", "Cell<${1:T}>", "Cell (e.g., Cell<Field>)"),
+            ("List<>", "List<${1:T}>", "List (e.g., List<Field>)"),
+            ("MerkleTree<>", "MerkleTree<${1:32}, ${2:Field}>", "Merkle tree (e.g., MerkleTree<32, Bytes<32>>)"),
+            ("HistoricMerkleTree<>", "HistoricMerkleTree<${1:32}, ${2:Field}>", "Historic Merkle tree"),
         ];
 
         for (label, snippet, detail) in type_snippets {
@@ -947,6 +1024,38 @@ impl LanguageServer for CompactLanguageServer {
                 }),
                 range: info.range,
             }));
+        }
+
+        // Check for member access (e.g., hovering on "increment" in "round.increment(1)")
+        let member_ctx = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            parser.get_member_access_context(&content, position.line, position.character)
+        };
+        if let Some(ctx) = member_ctx {
+            let var_type = {
+                let mut parser = self.parser_engine.lock().unwrap();
+                parser.get_variable_type(&content, &ctx.base_name)
+            };
+            // Fallback: `kernel` is implicitly available without a ledger declaration
+            let var_type = var_type.or_else(|| {
+                if ctx.base_name == "kernel" { Some("Kernel".to_string()) } else { None }
+            });
+            if let Some(type_str) = var_type {
+                let base_type = builtins::extract_base_type(&type_str);
+                if let Some(method) = builtins::find_method_by_name(base_type, &ctx.member_name) {
+                    let hover_text = format!(
+                        "```compact\n{}.{}  (on {})\n```\n\n{}",
+                        ctx.base_name, method.signature, type_str, method.documentation
+                    );
+                    return Ok(Some(Hover {
+                        contents: HoverContents::Markup(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: hover_text,
+                        }),
+                        range: Some(ctx.member_range),
+                    }));
+                }
+            }
         }
 
         let word = match utils::get_word_at_position(&content, position.line, position.character) {
