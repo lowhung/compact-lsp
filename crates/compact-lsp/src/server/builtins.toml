@@ -1,0 +1,373 @@
+# Built-in type method registry for Compact.
+#
+# This file defines all methods available on Compact's built-in ledger and
+# runtime types. It is embedded at compile time (include_str!) and parsed
+# once on first access.
+#
+# To add a new method, append a [[types.methods]] entry under the
+# appropriate [[types]] block. Order matters — methods appear in
+# completion lists in the order listed here.
+
+# ── Counter ──────────────────────────────────────────────────────────
+
+[[types]]
+name = "Counter"
+
+[[types.methods]]
+name = "increment"
+signature = "increment(amount: Uint<16>)"
+snippet = "increment(${1:amount})"
+doc = "Increment the counter by the given amount."
+
+[[types.methods]]
+name = "decrement"
+signature = "decrement(amount: Uint<16>)"
+snippet = "decrement(${1:amount})"
+doc = "Decrement the counter by the given amount."
+
+[[types.methods]]
+name = "read"
+signature = "read(): Uint<64>"
+snippet = "read()"
+doc = "Retrieve the current counter value."
+
+[[types.methods]]
+name = "lessThan"
+signature = "lessThan(threshold: Uint<64>): Boolean"
+snippet = "lessThan(${1:threshold})"
+doc = "Check if the counter is less than a threshold."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Reset the counter to zero."
+
+# ── Cell ─────────────────────────────────────────────────────────────
+
+[[types]]
+name = "Cell"
+
+[[types.methods]]
+name = "read"
+signature = "read(): T"
+snippet = "read()"
+doc = "Retrieve the current value of the cell."
+
+[[types.methods]]
+name = "write"
+signature = "write(value: T)"
+snippet = "write(${1:value})"
+doc = "Overwrite the cell contents."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Reset to the type's default value."
+
+# ── Map ──────────────────────────────────────────────────────────────
+
+[[types]]
+name = "Map"
+
+[[types.methods]]
+name = "insert"
+signature = "insert(key: K, value: V)"
+snippet = "insert(${1:key}, ${2:value})"
+doc = "Insert or update a key-value pair."
+
+[[types.methods]]
+name = "insertDefault"
+signature = "insertDefault(key: K)"
+snippet = "insertDefault(${1:key})"
+doc = "Insert a key with the value type's default value."
+
+[[types.methods]]
+name = "remove"
+signature = "remove(key: K)"
+snippet = "remove(${1:key})"
+doc = "Remove a key-value pair."
+
+[[types.methods]]
+name = "lookup"
+signature = "lookup(key: K): V"
+snippet = "lookup(${1:key})"
+doc = "Look up the value for a given key."
+
+[[types.methods]]
+name = "member"
+signature = "member(key: K): Boolean"
+snippet = "member(${1:key})"
+doc = "Check if a key exists in the map."
+
+[[types.methods]]
+name = "isEmpty"
+signature = "isEmpty(): Boolean"
+snippet = "isEmpty()"
+doc = "Check if the map is empty."
+
+[[types.methods]]
+name = "size"
+signature = "size(): Uint<64>"
+snippet = "size()"
+doc = "Get the number of entries in the map."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Clear the map to empty."
+
+# ── Set ──────────────────────────────────────────────────────────────
+
+[[types]]
+name = "Set"
+
+[[types.methods]]
+name = "insert"
+signature = "insert(element: T)"
+snippet = "insert(${1:element})"
+doc = "Add an element to the set."
+
+[[types.methods]]
+name = "remove"
+signature = "remove(element: T)"
+snippet = "remove(${1:element})"
+doc = "Remove an element from the set."
+
+[[types.methods]]
+name = "member"
+signature = "member(element: T): Boolean"
+snippet = "member(${1:element})"
+doc = "Check if an element is in the set."
+
+[[types.methods]]
+name = "isEmpty"
+signature = "isEmpty(): Boolean"
+snippet = "isEmpty()"
+doc = "Check if the set is empty."
+
+[[types.methods]]
+name = "size"
+signature = "size(): Uint<64>"
+snippet = "size()"
+doc = "Get the number of elements in the set."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Clear the set to empty."
+
+# ── List ─────────────────────────────────────────────────────────────
+
+[[types]]
+name = "List"
+
+[[types.methods]]
+name = "pushFront"
+signature = "pushFront(value: T)"
+snippet = "pushFront(${1:value})"
+doc = "Prepend an element to the front of the list."
+
+[[types.methods]]
+name = "popFront"
+signature = "popFront()"
+snippet = "popFront()"
+doc = "Remove the first element from the list."
+
+[[types.methods]]
+name = "head"
+signature = "head(): Maybe<T>"
+snippet = "head()"
+doc = "Retrieve the first element, or nothing if the list is empty."
+
+[[types.methods]]
+name = "length"
+signature = "length(): Uint<64>"
+snippet = "length()"
+doc = "Get the number of elements in the list."
+
+[[types.methods]]
+name = "isEmpty"
+signature = "isEmpty(): Boolean"
+snippet = "isEmpty()"
+doc = "Check if the list is empty."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Clear the list to empty."
+
+# ── MerkleTree ───────────────────────────────────────────────────────
+
+[[types]]
+name = "MerkleTree"
+
+[[types.methods]]
+name = "insert"
+signature = "insert(item: T)"
+snippet = "insert(${1:item})"
+doc = "Insert a leaf at the first free index."
+
+[[types.methods]]
+name = "insertIndex"
+signature = "insertIndex(item: T, index: Uint<64>)"
+snippet = "insertIndex(${1:item}, ${2:index})"
+doc = "Insert a leaf at a specific index."
+
+[[types.methods]]
+name = "insertHash"
+signature = "insertHash(hash: Bytes<32>)"
+snippet = "insertHash(${1:hash})"
+doc = "Insert a hash digest at the first free index."
+
+[[types.methods]]
+name = "insertHashIndex"
+signature = "insertHashIndex(hash: Bytes<32>, index: Uint<64>)"
+snippet = "insertHashIndex(${1:hash}, ${2:index})"
+doc = "Insert a hash digest at a specific index."
+
+[[types.methods]]
+name = "insertIndexDefault"
+signature = "insertIndexDefault(index: Uint<64>)"
+snippet = "insertIndexDefault(${1:index})"
+doc = "Insert default value at index (emulates removal)."
+
+[[types.methods]]
+name = "checkRoot"
+signature = "checkRoot(root: MerkleTreeDigest): Boolean"
+snippet = "checkRoot(${1:root})"
+doc = "Validate a root against the current Merkle root."
+
+[[types.methods]]
+name = "isFull"
+signature = "isFull(): Boolean"
+snippet = "isFull()"
+doc = "Check if the tree is at capacity."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Clear the tree to empty."
+
+# ── HistoricMerkleTree ───────────────────────────────────────────────
+
+[[types]]
+name = "HistoricMerkleTree"
+
+[[types.methods]]
+name = "insert"
+signature = "insert(item: T)"
+snippet = "insert(${1:item})"
+doc = "Insert a leaf at the first free index."
+
+[[types.methods]]
+name = "insertIndex"
+signature = "insertIndex(item: T, index: Uint<64>)"
+snippet = "insertIndex(${1:item}, ${2:index})"
+doc = "Insert a leaf at a specific index."
+
+[[types.methods]]
+name = "insertHash"
+signature = "insertHash(hash: Bytes<32>)"
+snippet = "insertHash(${1:hash})"
+doc = "Insert a hash digest at the first free index."
+
+[[types.methods]]
+name = "insertHashIndex"
+signature = "insertHashIndex(hash: Bytes<32>, index: Uint<64>)"
+snippet = "insertHashIndex(${1:hash}, ${2:index})"
+doc = "Insert a hash digest at a specific index."
+
+[[types.methods]]
+name = "insertIndexDefault"
+signature = "insertIndexDefault(index: Uint<64>)"
+snippet = "insertIndexDefault(${1:index})"
+doc = "Insert default value at index (emulates removal)."
+
+[[types.methods]]
+name = "checkRoot"
+signature = "checkRoot(root: MerkleTreeDigest): Boolean"
+snippet = "checkRoot(${1:root})"
+doc = "Validate a root against any historical Merkle root."
+
+[[types.methods]]
+name = "isFull"
+signature = "isFull(): Boolean"
+snippet = "isFull()"
+doc = "Check if the tree is at capacity."
+
+[[types.methods]]
+name = "resetToDefault"
+signature = "resetToDefault()"
+snippet = "resetToDefault()"
+doc = "Clear the tree to empty."
+
+[[types.methods]]
+name = "resetHistory"
+signature = "resetHistory()"
+snippet = "resetHistory()"
+doc = "Clear history, preserving only the current root."
+
+# ── Kernel ───────────────────────────────────────────────────────────
+
+[[types]]
+name = "Kernel"
+
+[[types.methods]]
+name = "self"
+signature = "self(): ContractAddress"
+snippet = "self()"
+doc = "Return the current contract's address."
+
+[[types.methods]]
+name = "mint"
+signature = "mint(domain_sep: Bytes<32>, amount: Uint<64>)"
+snippet = "mint(${1:domain_sep}, ${2:amount})"
+doc = "Create shielded coins with a contract-derived token type."
+
+[[types.methods]]
+name = "blockTimeGreaterThan"
+signature = "blockTimeGreaterThan(time: Uint<64>): Boolean"
+snippet = "blockTimeGreaterThan(${1:time})"
+doc = "Check if the current block time exceeds a given timestamp."
+
+[[types.methods]]
+name = "blockTimeLessThan"
+signature = "blockTimeLessThan(time: Uint<64>): Boolean"
+snippet = "blockTimeLessThan(${1:time})"
+doc = "Check if the current block time is before a given timestamp."
+
+[[types.methods]]
+name = "checkpoint"
+signature = "checkpoint()"
+snippet = "checkpoint()"
+doc = "Mark execution as an atomic unit for partial rollback."
+
+[[types.methods]]
+name = "claimContractCall"
+signature = "claimContractCall(addr: Bytes<32>, entry_point: Bytes<32>, comm: Field)"
+snippet = "claimContractCall(${1:addr}, ${2:entry_point}, ${3:comm})"
+doc = "Require a matching contract call in the transaction."
+
+[[types.methods]]
+name = "claimZswapCoinReceive"
+signature = "claimZswapCoinReceive(note: Bytes<32>)"
+snippet = "claimZswapCoinReceive(${1:note})"
+doc = "Claim a Zswap coin receive commitment."
+
+[[types.methods]]
+name = "claimZswapCoinSpend"
+signature = "claimZswapCoinSpend(note: Bytes<32>)"
+snippet = "claimZswapCoinSpend(${1:note})"
+doc = "Claim a Zswap coin spend commitment."
+
+[[types.methods]]
+name = "claimZswapNullifier"
+signature = "claimZswapNullifier(nul: Bytes<32>)"
+snippet = "claimZswapNullifier(${1:nul})"
+doc = "Claim a Zswap nullifier."

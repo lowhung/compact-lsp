@@ -64,6 +64,9 @@ regex = "1"
 # Temp files for compiler invocation
 tempfile = "3"
 
+# TOML parsing for data-driven registries
+toml = "0.8"
+
 # Tree-sitter for parsing
 tree-sitter = "0.25"
 tree-sitter-compact = { git = "https://github.com/midnightntwrk/compact-tree-sitter", branch = "main" }

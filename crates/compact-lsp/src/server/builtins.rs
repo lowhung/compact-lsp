@@ -3,6 +3,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Built-in type method registry for dot-completion.
+//!
+//! Method definitions live in `builtins.toml` (embedded at compile time).
+//! This module parses the TOML once on first access and exposes the same
+//! public API as before.
+
+use serde::Deserialize;
+use std::sync::OnceLock;
 
 /// A built-in method available on a Compact type.
 pub struct BuiltinMethod {
@@ -16,355 +23,82 @@ pub struct BuiltinMethod {
     pub documentation: &'static str,
 }
 
+// ── TOML deserialization structures ─────────────────────────────────
+
+#[derive(Deserialize)]
+struct Registry {
+    types: Vec<TypeDef>,
+}
+
+#[derive(Deserialize)]
+struct TypeDef {
+    name: String,
+    methods: Vec<MethodDef>,
+}
+
+#[derive(Deserialize)]
+struct MethodDef {
+    name: String,
+    signature: String,
+    snippet: String,
+    doc: String,
+}
+
+// ── Parsed + converted registry ─────────────────────────────────────
+
+struct ParsedRegistry {
+    types: Vec<ParsedType>,
+}
+
+struct ParsedType {
+    name: String,
+    methods: Vec<BuiltinMethod>,
+}
+
+static REGISTRY: OnceLock<ParsedRegistry> = OnceLock::new();
+
+fn registry() -> &'static ParsedRegistry {
+    REGISTRY.get_or_init(|| {
+        // The TOML source is embedded at compile time — no runtime I/O.
+        let raw: Registry =
+            toml::from_str(include_str!("builtins.toml")).expect("builtins.toml is invalid TOML");
+
+        // Leak strings so BuiltinMethod can hold &'static str references.
+        // This happens exactly once for the lifetime of the process.
+        let types = raw
+            .types
+            .into_iter()
+            .map(|t| ParsedType {
+                name: t.name,
+                methods: t
+                    .methods
+                    .into_iter()
+                    .map(|m| BuiltinMethod {
+                        name: Box::leak(m.name.into_boxed_str()),
+                        signature: Box::leak(m.signature.into_boxed_str()),
+                        snippet: Box::leak(m.snippet.into_boxed_str()),
+                        documentation: Box::leak(m.doc.into_boxed_str()),
+                    })
+                    .collect(),
+            })
+            .collect();
+
+        ParsedRegistry { types }
+    })
+}
+
 /// Return the built-in methods for a given base type name.
 pub fn methods_for_type(type_name: &str) -> &'static [BuiltinMethod] {
-    match type_name {
-        "Counter" => &[
-            BuiltinMethod {
-                name: "increment",
-                signature: "increment(amount: Uint<16>)",
-                snippet: "increment(${1:amount})",
-                documentation: "Increment the counter by the given amount.",
-            },
-            BuiltinMethod {
-                name: "decrement",
-                signature: "decrement(amount: Uint<16>)",
-                snippet: "decrement(${1:amount})",
-                documentation: "Decrement the counter by the given amount.",
-            },
-            BuiltinMethod {
-                name: "read",
-                signature: "read(): Uint<64>",
-                snippet: "read()",
-                documentation: "Retrieve the current counter value.",
-            },
-            BuiltinMethod {
-                name: "lessThan",
-                signature: "lessThan(threshold: Uint<64>): Boolean",
-                snippet: "lessThan(${1:threshold})",
-                documentation: "Check if the counter is less than a threshold.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Reset the counter to zero.",
-            },
-        ],
-        "Cell" => &[
-            BuiltinMethod {
-                name: "read",
-                signature: "read(): T",
-                snippet: "read()",
-                documentation: "Retrieve the current value of the cell.",
-            },
-            BuiltinMethod {
-                name: "write",
-                signature: "write(value: T)",
-                snippet: "write(${1:value})",
-                documentation: "Overwrite the cell contents.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Reset to the type's default value.",
-            },
-        ],
-        "Map" => &[
-            BuiltinMethod {
-                name: "insert",
-                signature: "insert(key: K, value: V)",
-                snippet: "insert(${1:key}, ${2:value})",
-                documentation: "Insert or update a key-value pair.",
-            },
-            BuiltinMethod {
-                name: "insertDefault",
-                signature: "insertDefault(key: K)",
-                snippet: "insertDefault(${1:key})",
-                documentation: "Insert a key with the value type's default value.",
-            },
-            BuiltinMethod {
-                name: "remove",
-                signature: "remove(key: K)",
-                snippet: "remove(${1:key})",
-                documentation: "Remove a key-value pair.",
-            },
-            BuiltinMethod {
-                name: "lookup",
-                signature: "lookup(key: K): V",
-                snippet: "lookup(${1:key})",
-                documentation: "Look up the value for a given key.",
-            },
-            BuiltinMethod {
-                name: "member",
-                signature: "member(key: K): Boolean",
-                snippet: "member(${1:key})",
-                documentation: "Check if a key exists in the map.",
-            },
-            BuiltinMethod {
-                name: "isEmpty",
-                signature: "isEmpty(): Boolean",
-                snippet: "isEmpty()",
-                documentation: "Check if the map is empty.",
-            },
-            BuiltinMethod {
-                name: "size",
-                signature: "size(): Uint<64>",
-                snippet: "size()",
-                documentation: "Get the number of entries in the map.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Clear the map to empty.",
-            },
-        ],
-        "Set" => &[
-            BuiltinMethod {
-                name: "insert",
-                signature: "insert(element: T)",
-                snippet: "insert(${1:element})",
-                documentation: "Add an element to the set.",
-            },
-            BuiltinMethod {
-                name: "remove",
-                signature: "remove(element: T)",
-                snippet: "remove(${1:element})",
-                documentation: "Remove an element from the set.",
-            },
-            BuiltinMethod {
-                name: "member",
-                signature: "member(element: T): Boolean",
-                snippet: "member(${1:element})",
-                documentation: "Check if an element is in the set.",
-            },
-            BuiltinMethod {
-                name: "isEmpty",
-                signature: "isEmpty(): Boolean",
-                snippet: "isEmpty()",
-                documentation: "Check if the set is empty.",
-            },
-            BuiltinMethod {
-                name: "size",
-                signature: "size(): Uint<64>",
-                snippet: "size()",
-                documentation: "Get the number of elements in the set.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Clear the set to empty.",
-            },
-        ],
-        "List" => &[
-            BuiltinMethod {
-                name: "pushFront",
-                signature: "pushFront(value: T)",
-                snippet: "pushFront(${1:value})",
-                documentation: "Prepend an element to the front of the list.",
-            },
-            BuiltinMethod {
-                name: "popFront",
-                signature: "popFront()",
-                snippet: "popFront()",
-                documentation: "Remove the first element from the list.",
-            },
-            BuiltinMethod {
-                name: "head",
-                signature: "head(): Maybe<T>",
-                snippet: "head()",
-                documentation: "Retrieve the first element, or nothing if the list is empty.",
-            },
-            BuiltinMethod {
-                name: "length",
-                signature: "length(): Uint<64>",
-                snippet: "length()",
-                documentation: "Get the number of elements in the list.",
-            },
-            BuiltinMethod {
-                name: "isEmpty",
-                signature: "isEmpty(): Boolean",
-                snippet: "isEmpty()",
-                documentation: "Check if the list is empty.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Clear the list to empty.",
-            },
-        ],
-        "MerkleTree" => &[
-            BuiltinMethod {
-                name: "insert",
-                signature: "insert(item: T)",
-                snippet: "insert(${1:item})",
-                documentation: "Insert a leaf at the first free index.",
-            },
-            BuiltinMethod {
-                name: "insertIndex",
-                signature: "insertIndex(item: T, index: Uint<64>)",
-                snippet: "insertIndex(${1:item}, ${2:index})",
-                documentation: "Insert a leaf at a specific index.",
-            },
-            BuiltinMethod {
-                name: "insertHash",
-                signature: "insertHash(hash: Bytes<32>)",
-                snippet: "insertHash(${1:hash})",
-                documentation: "Insert a hash digest at the first free index.",
-            },
-            BuiltinMethod {
-                name: "insertHashIndex",
-                signature: "insertHashIndex(hash: Bytes<32>, index: Uint<64>)",
-                snippet: "insertHashIndex(${1:hash}, ${2:index})",
-                documentation: "Insert a hash digest at a specific index.",
-            },
-            BuiltinMethod {
-                name: "insertIndexDefault",
-                signature: "insertIndexDefault(index: Uint<64>)",
-                snippet: "insertIndexDefault(${1:index})",
-                documentation: "Insert default value at index (emulates removal).",
-            },
-            BuiltinMethod {
-                name: "checkRoot",
-                signature: "checkRoot(root: MerkleTreeDigest): Boolean",
-                snippet: "checkRoot(${1:root})",
-                documentation: "Validate a root against the current Merkle root.",
-            },
-            BuiltinMethod {
-                name: "isFull",
-                signature: "isFull(): Boolean",
-                snippet: "isFull()",
-                documentation: "Check if the tree is at capacity.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Clear the tree to empty.",
-            },
-        ],
-        "HistoricMerkleTree" => &[
-            BuiltinMethod {
-                name: "insert",
-                signature: "insert(item: T)",
-                snippet: "insert(${1:item})",
-                documentation: "Insert a leaf at the first free index.",
-            },
-            BuiltinMethod {
-                name: "insertIndex",
-                signature: "insertIndex(item: T, index: Uint<64>)",
-                snippet: "insertIndex(${1:item}, ${2:index})",
-                documentation: "Insert a leaf at a specific index.",
-            },
-            BuiltinMethod {
-                name: "insertHash",
-                signature: "insertHash(hash: Bytes<32>)",
-                snippet: "insertHash(${1:hash})",
-                documentation: "Insert a hash digest at the first free index.",
-            },
-            BuiltinMethod {
-                name: "insertHashIndex",
-                signature: "insertHashIndex(hash: Bytes<32>, index: Uint<64>)",
-                snippet: "insertHashIndex(${1:hash}, ${2:index})",
-                documentation: "Insert a hash digest at a specific index.",
-            },
-            BuiltinMethod {
-                name: "insertIndexDefault",
-                signature: "insertIndexDefault(index: Uint<64>)",
-                snippet: "insertIndexDefault(${1:index})",
-                documentation: "Insert default value at index (emulates removal).",
-            },
-            BuiltinMethod {
-                name: "checkRoot",
-                signature: "checkRoot(root: MerkleTreeDigest): Boolean",
-                snippet: "checkRoot(${1:root})",
-                documentation: "Validate a root against any historical Merkle root.",
-            },
-            BuiltinMethod {
-                name: "isFull",
-                signature: "isFull(): Boolean",
-                snippet: "isFull()",
-                documentation: "Check if the tree is at capacity.",
-            },
-            BuiltinMethod {
-                name: "resetToDefault",
-                signature: "resetToDefault()",
-                snippet: "resetToDefault()",
-                documentation: "Clear the tree to empty.",
-            },
-            BuiltinMethod {
-                name: "resetHistory",
-                signature: "resetHistory()",
-                snippet: "resetHistory()",
-                documentation: "Clear history, preserving only the current root.",
-            },
-        ],
-        "Kernel" => &[
-            BuiltinMethod {
-                name: "self",
-                signature: "self(): ContractAddress",
-                snippet: "self()",
-                documentation: "Return the current contract's address.",
-            },
-            BuiltinMethod {
-                name: "mint",
-                signature: "mint(domain_sep: Bytes<32>, amount: Uint<64>)",
-                snippet: "mint(${1:domain_sep}, ${2:amount})",
-                documentation: "Create shielded coins with a contract-derived token type.",
-            },
-            BuiltinMethod {
-                name: "blockTimeGreaterThan",
-                signature: "blockTimeGreaterThan(time: Uint<64>): Boolean",
-                snippet: "blockTimeGreaterThan(${1:time})",
-                documentation: "Check if the current block time exceeds a given timestamp.",
-            },
-            BuiltinMethod {
-                name: "blockTimeLessThan",
-                signature: "blockTimeLessThan(time: Uint<64>): Boolean",
-                snippet: "blockTimeLessThan(${1:time})",
-                documentation: "Check if the current block time is before a given timestamp.",
-            },
-            BuiltinMethod {
-                name: "checkpoint",
-                signature: "checkpoint()",
-                snippet: "checkpoint()",
-                documentation: "Mark execution as an atomic unit for partial rollback.",
-            },
-            BuiltinMethod {
-                name: "claimContractCall",
-                signature: "claimContractCall(addr: Bytes<32>, entry_point: Bytes<32>, comm: Field)",
-                snippet: "claimContractCall(${1:addr}, ${2:entry_point}, ${3:comm})",
-                documentation: "Require a matching contract call in the transaction.",
-            },
-            BuiltinMethod {
-                name: "claimZswapCoinReceive",
-                signature: "claimZswapCoinReceive(note: Bytes<32>)",
-                snippet: "claimZswapCoinReceive(${1:note})",
-                documentation: "Claim a Zswap coin receive commitment.",
-            },
-            BuiltinMethod {
-                name: "claimZswapCoinSpend",
-                signature: "claimZswapCoinSpend(note: Bytes<32>)",
-                snippet: "claimZswapCoinSpend(${1:note})",
-                documentation: "Claim a Zswap coin spend commitment.",
-            },
-            BuiltinMethod {
-                name: "claimZswapNullifier",
-                signature: "claimZswapNullifier(nul: Bytes<32>)",
-                snippet: "claimZswapNullifier(${1:nul})",
-                documentation: "Claim a Zswap nullifier.",
-            },
-        ],
-        _ => &[],
-    }
+    registry()
+        .types
+        .iter()
+        .find(|t| t.name == type_name)
+        .map(|t| t.methods.as_slice())
+        .unwrap_or(&[])
 }
 
 /// Find a specific built-in method by type and method name.
-pub fn find_method_by_name<'a>(type_name: &str, method_name: &str) -> Option<&'a BuiltinMethod> {
+pub fn find_method_by_name(type_name: &str, method_name: &str) -> Option<&'static BuiltinMethod> {
     methods_for_type(type_name)
         .iter()
         .find(|m| m.name == method_name)
@@ -534,5 +268,43 @@ mod tests {
     #[test]
     fn test_find_method_by_name_unknown_type() {
         assert!(find_method_by_name("Boolean", "increment").is_none());
+    }
+
+    #[test]
+    fn test_all_methods_have_required_fields() {
+        for ptype in &registry().types {
+            assert!(!ptype.name.is_empty(), "Type name must not be empty");
+            assert!(
+                !ptype.methods.is_empty(),
+                "Type {} must have at least one method",
+                ptype.name
+            );
+            for method in &ptype.methods {
+                assert!(
+                    !method.name.is_empty(),
+                    "{}.{}: name must not be empty",
+                    ptype.name,
+                    method.name
+                );
+                assert!(
+                    !method.signature.is_empty(),
+                    "{}.{}: signature must not be empty",
+                    ptype.name,
+                    method.name
+                );
+                assert!(
+                    !method.snippet.is_empty(),
+                    "{}.{}: snippet must not be empty",
+                    ptype.name,
+                    method.name
+                );
+                assert!(
+                    !method.documentation.is_empty(),
+                    "{}.{}: documentation must not be empty",
+                    ptype.name,
+                    method.name
+                );
+            }
+        }
     }
 }
