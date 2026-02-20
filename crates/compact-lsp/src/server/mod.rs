@@ -947,21 +947,46 @@ impl LanguageServer for CompactLanguageServer {
 
         // Code snippets
         let snippets = [
+            // Circuit snippets
             ("circuit", "circuit snippet", "circuit ${1:name}(${2:params}): ${3:ReturnType} {\n\t$0\n}", "Circuit function template"),
             ("export circuit", "export circuit snippet", "export circuit ${1:name}(${2:params}): ${3:ReturnType} {\n\t$0\n}", "Exported circuit function template"),
-            ("pure circuit", "pure circuit snippet", "export pure circuit ${1:name}(${2:params}): ${3:ReturnType} {\n\t$0\n}", "Pure circuit function template"),
+            ("pure circuit", "pure circuit snippet", "pure circuit ${1:name}(${2:params}): ${3:ReturnType} {\n\t$0\n}", "Pure circuit function template"),
+            ("export pure circuit", "export pure circuit snippet", "export pure circuit ${1:name}(${2:params}): ${3:ReturnType} {\n\t$0\n}", "Exported pure circuit function template"),
+            // Struct snippets
             ("struct", "struct snippet", "struct ${1:Name} {\n\t${2:field}: ${3:Type};\n}", "Struct definition template"),
             ("export struct", "export struct snippet", "export struct ${1:Name} {\n\t${2:field}: ${3:Type};\n}", "Exported struct definition template"),
+            // Enum snippets
             ("enum", "enum snippet", "enum ${1:Name} {\n\t${2:Variant1},\n\t${3:Variant2},\n}", "Enum definition template"),
+            ("export enum", "export enum snippet", "export enum ${1:Name} {\n\t${2:Variant1},\n\t${3:Variant2},\n}", "Exported enum definition template"),
+            // Ledger snippets
             ("ledger", "ledger snippet", "ledger ${1:name}: ${2:Type};", "Ledger declaration template"),
+            ("export ledger", "export ledger snippet", "export ledger ${1:name}: ${2:Type};", "Exported ledger declaration template"),
+            ("sealed ledger", "sealed ledger snippet", "sealed ledger ${1:name}: ${2:Type};", "Sealed ledger declaration template"),
+            ("export sealed ledger", "export sealed ledger snippet", "export sealed ledger ${1:name}: ${2:Type};", "Exported sealed ledger declaration template"),
+            // Witness snippets
             ("witness", "witness snippet", "witness ${1:name}(${2:params}): ${3:ReturnType};", "Witness declaration template"),
+            ("export witness", "export witness snippet", "export witness ${1:name}(${2:params}): ${3:ReturnType};", "Exported witness declaration template"),
+            // Contract snippets
+            ("contract", "contract snippet", "contract ${1:Name} {\n\tcircuit ${2:fn}(${3:params}): ${4:ReturnType};\n}", "External contract declaration template"),
+            ("export contract", "export contract snippet", "export contract ${1:Name} {\n\tcircuit ${2:fn}(${3:params}): ${4:ReturnType};\n}", "Exported contract declaration template"),
+            // Module snippets
+            ("module", "module snippet", "module ${1:Name} {\n\t$0\n}", "Module definition template"),
+            ("export module", "export module snippet", "export module ${1:Name} {\n\t$0\n}", "Exported module definition template"),
+            // Other declaration snippets
             ("constructor", "constructor snippet", "constructor(${1:params}) {\n\t$0\n}", "Constructor template"),
+            ("const", "const snippet", "const ${1:name}: ${2:Type} = ${3:value};", "Constant declaration template"),
+            ("include", "include snippet", "include \"${1:path}\";", "File inclusion template"),
+            // Import snippets
+            ("import", "import snippet", "import ${1:Module};", "Import module template"),
+            ("import file", "import file snippet", "import \"${1:path}\";", "Import file template"),
+            ("import prefix", "import prefix snippet", "import ${1:Module} prefix ${2:alias};", "Import with prefix alias template"),
+            // Statement snippets
             ("if", "if snippet", "if (${1:condition}) {\n\t$0\n}", "If statement template"),
             ("if-else", "if-else snippet", "if (${1:condition}) {\n\t$2\n} else {\n\t$0\n}", "If-else statement template"),
             ("for", "for snippet", "for (const ${1:i} of ${2:0}..${3:10}) {\n\t$0\n}", "For loop template"),
             ("assert", "assert snippet", "assert ${1:condition} \"${2:error message}\";", "Assertion template"),
-            ("pragma", "pragma snippet", "pragma ${1:compact} ${2:>=0.1.0};", "Pragma declaration template"),
-            ("import", "import snippet", "import ${1:Module};", "Import statement template"),
+            // Pragma snippet
+            ("pragma", "pragma snippet", "pragma language_version ${1:>=0.14.0};", "Pragma declaration template"),
         ];
 
         for (label, filter, snippet, detail) in snippets {
