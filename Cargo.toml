@@ -17,8 +17,8 @@ edition = "2021"
 license = "MIT"
 authors = ["1NickPappas"]
 description = "Language Server Protocol implementation for the Compact smart contract language"
-repository = "https://github.com/midnightntwrk/compact-lsp"
-homepage = "https://github.com/midnightntwrk/compact-lsp"
+repository = "https://github.com/1NickPappas/compact-lsp"
+homepage = "https://github.com/1NickPappas/compact-lsp"
 keywords = ["lsp", "language-server", "compact", "smart-contracts", "midnight"]
 categories = ["development-tools", "text-editors"]
 rust-version = "1.70"
@@ -69,4 +69,7 @@ toml = "0.8"
 
 # Tree-sitter for parsing
 tree-sitter = "0.25"
-tree-sitter-compact = { git = "https://github.com/midnightntwrk/compact-tree-sitter", branch = "main" }
+# The original midnightntwrk grammar repository is archived and its last
+# revision predates current Compact syntax. Pin the maintained grammar fork so
+# parser behavior is reproducible across local builds and CI.
+tree-sitter-compact = { git = "https://github.com/midnames/compact-tree-sitter", rev = "9ea58fc47c88af914599c368cce031ad6343965b" }
