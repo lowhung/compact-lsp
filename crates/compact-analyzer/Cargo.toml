@@ -30,6 +30,11 @@ tokio.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 
+# Toolchain configuration and version handling
+serde_json.workspace = true
+semver.workspace = true
+url.workspace = true
+
 # Parse compiler error output
 regex.workspace = true
 
