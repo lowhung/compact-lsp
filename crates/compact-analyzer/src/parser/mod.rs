@@ -125,7 +125,7 @@ impl ParserEngine {
             _ => return None,
         };
 
-        let range = self.node_range(node);
+        let range = self.node_range(node, source);
         let selection_range = range; // Could be refined to just the name
 
         // Get children symbols (e.g., struct fields, enum variants)
@@ -160,7 +160,7 @@ impl ParserEngine {
                 for child in node.children(&mut cursor) {
                     if child.kind() == "arg" {
                         if let Some(name) = self.get_field_text(child, "id", source) {
-                            let range = self.node_range(child);
+                            let range = self.node_range(child, source);
                             #[allow(deprecated)]
                             children.push(DocumentSymbol {
                                 name,
@@ -184,7 +184,7 @@ impl ParserEngine {
                         let text = self.node_text(child, source);
                         // Skip the enum name itself
                         if Some(&text) != self.get_field_text(node, "name", source).as_ref() {
-                            let range = self.node_range(child);
+                            let range = self.node_range(child, source);
                             #[allow(deprecated)]
                             children.push(DocumentSymbol {
                                 name: text,
@@ -210,7 +210,7 @@ impl ParserEngine {
                 for child in node.children(&mut cursor) {
                     if child.kind() == "ecdecl_circuit" {
                         if let Some(name) = self.get_field_text(child, "id", source) {
-                            let range = self.node_range(child);
+                            let range = self.node_range(child, source);
                             #[allow(deprecated)]
                             children.push(DocumentSymbol {
                                 name,
@@ -300,31 +300,72 @@ impl ParserEngine {
         text.to_string()
     }
 
-    /// Convert tree-sitter node position to LSP Range.
-    fn node_range(&self, node: Node) -> Range {
+    fn lsp_position_to_point(
+        source: &str,
+        line: u32,
+        utf16_character: u32,
+    ) -> Option<tree_sitter::Point> {
+        let line_content = source.split('\n').nth(line as usize)?;
+        let target = utf16_character as usize;
+        let mut utf16_offset = 0;
+
+        for (byte_offset, character) in line_content.char_indices() {
+            if utf16_offset == target {
+                return Some(tree_sitter::Point {
+                    row: line as usize,
+                    column: byte_offset,
+                });
+            }
+
+            utf16_offset += character.len_utf16();
+            if utf16_offset > target {
+                return None;
+            }
+        }
+
+        (utf16_offset == target).then_some(tree_sitter::Point {
+            row: line as usize,
+            column: line_content.len(),
+        })
+    }
+
+    fn point_to_lsp_position(source: &[u8], point: tree_sitter::Point) -> Position {
+        let line = source
+            .split(|byte| *byte == b'\n')
+            .nth(point.row)
+            .unwrap_or_default();
+        let byte_column = point.column.min(line.len());
+        let character = std::str::from_utf8(&line[..byte_column])
+            .map(|prefix| prefix.encode_utf16().count() as u32)
+            .unwrap_or(byte_column as u32);
+
+        Position {
+            line: point.row as u32,
+            character,
+        }
+    }
+
+    /// Convert a tree-sitter byte-based node position to an LSP UTF-16 range.
+    fn node_range(&self, node: Node, source: impl AsRef<[u8]>) -> Range {
+        let source = source.as_ref();
         let start = node.start_position();
         let end = node.end_position();
         Range {
-            start: Position {
-                line: start.row as u32,
-                character: start.column as u32,
-            },
-            end: Position {
-                line: end.row as u32,
-                character: end.column as u32,
-            },
+            start: Self::point_to_lsp_position(source, start),
+            end: Self::point_to_lsp_position(source, end),
         }
     }
 
     /// Convert tree-sitter node position to SymbolLocation.
-    fn node_to_symbol_location(&self, node: Node) -> SymbolLocation {
-        let start = node.start_position();
-        let end = node.end_position();
+    fn node_to_symbol_location(&self, node: Node, source: impl AsRef<[u8]>) -> SymbolLocation {
+        let source = source.as_ref();
+        let start = Self::point_to_lsp_position(source, node.start_position());
+        let end = Self::point_to_lsp_position(source, node.end_position());
         SymbolLocation {
-            start_line: start.row as u32,
-            start_char: start.column as u32,
-            end_line: end.row as u32,
-            end_char: end.column as u32,
+            start_line: start.line,
+            start_char: start.character,
+            end_line: end.line,
+            end_char: end.character,
         }
     }
 
@@ -338,14 +379,14 @@ impl ParserEngine {
         let root = tree.root_node();
         let mut ranges = Vec::new();
 
-        self.collect_folding_ranges(root, &mut ranges);
+        self.collect_folding_ranges(root, source.as_bytes(), &mut ranges);
 
         ranges
     }
 
     /// Recursively collect folding ranges.
     #[allow(clippy::only_used_in_recursion)]
-    fn collect_folding_ranges(&self, node: Node, ranges: &mut Vec<FoldingRange>) {
+    fn collect_folding_ranges(&self, node: Node, source: &[u8], ranges: &mut Vec<FoldingRange>) {
         let kind = node.kind();
 
         // Determine if this node should be foldable
@@ -367,11 +408,13 @@ impl ParserEngine {
 
             // Only fold if spans multiple lines
             if end.row > start.row {
+                let start = Self::point_to_lsp_position(source, start);
+                let end = Self::point_to_lsp_position(source, end);
                 ranges.push(FoldingRange {
-                    start_line: start.row as u32,
-                    start_character: Some(start.column as u32),
-                    end_line: end.row as u32,
-                    end_character: Some(end.column as u32),
+                    start_line: start.line,
+                    start_character: Some(start.character),
+                    end_line: end.line,
+                    end_character: Some(end.character),
                     kind: Some(fold_kind),
                     collapsed_text: None,
                 });
@@ -381,7 +424,7 @@ impl ParserEngine {
         // Recurse into children
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            self.collect_folding_ranges(child, ranges);
+            self.collect_folding_ranges(child, source, ranges);
         }
     }
 
@@ -391,11 +434,7 @@ impl ParserEngine {
         let root = tree.root_node();
         let source_bytes = source.as_bytes();
 
-        // Convert LSP position to tree-sitter point
-        let point = tree_sitter::Point {
-            row: line as usize,
-            column: character as usize,
-        };
+        let point = Self::lsp_position_to_point(source, line, character)?;
 
         // Find the deepest node at this position
         let node = root.descendant_for_point_range(point, point)?;
@@ -412,7 +451,7 @@ impl ParserEngine {
         if let Some(doc) = self.keyword_docs(&text) {
             return Some(HoverInfo {
                 content: doc,
-                range: Some(self.node_range(node)),
+                range: Some(self.node_range(node, source)),
             });
         }
 
@@ -420,7 +459,7 @@ impl ParserEngine {
         if let Some(doc) = self.builtin_type_docs(&text) {
             return Some(HoverInfo {
                 content: doc,
-                range: Some(self.node_range(node)),
+                range: Some(self.node_range(node, source)),
             });
         }
 
@@ -514,7 +553,7 @@ impl ParserEngine {
                         "```compact\n{}\n```\n\nCircuit function{}",
                         signature, doc_suffix
                     ),
-                    range: Some(self.node_range(node)),
+                    range: Some(self.node_range(node, source)),
                 })
             }
             "edecl" => {
@@ -524,7 +563,7 @@ impl ParserEngine {
                         "```compact\n{}\n```\n\nExternal circuit declaration{}",
                         signature, doc_suffix
                     ),
-                    range: Some(self.node_range(node)),
+                    range: Some(self.node_range(node, source)),
                 })
             }
             "wdecl" => {
@@ -534,7 +573,7 @@ impl ParserEngine {
                         "```compact\n{}\n```\n\nWitness function{}",
                         signature, doc_suffix
                     ),
-                    range: Some(self.node_range(node)),
+                    range: Some(self.node_range(node, source)),
                 })
             }
             "ldecl" => {
@@ -547,7 +586,7 @@ impl ParserEngine {
                         "```compact\nledger {}: {}\n```\n\nLedger state{}",
                         name, type_text, doc_suffix
                     ),
-                    range: Some(self.node_range(node)),
+                    range: Some(self.node_range(node, source)),
                 })
             }
             "struct" => {
@@ -563,7 +602,7 @@ impl ParserEngine {
                         "```compact\nstruct {}\n```\n\nStruct type{}{}",
                         name, fields_str, doc_suffix
                     ),
-                    range: Some(self.node_range(node)),
+                    range: Some(self.node_range(node, source)),
                 })
             }
             "enumdef" => {
@@ -579,7 +618,7 @@ impl ParserEngine {
                         "```compact\nenum {}\n```\n\nEnum type{}{}",
                         name, variants_str, doc_suffix
                     ),
-                    range: Some(self.node_range(node)),
+                    range: Some(self.node_range(node, source)),
                 })
             }
             _ => None,
@@ -703,11 +742,7 @@ impl ParserEngine {
         let root = tree.root_node();
         let source_bytes = source.as_bytes();
 
-        // Convert LSP position to tree-sitter point
-        let point = tree_sitter::Point {
-            row: line as usize,
-            column: character as usize,
-        };
+        let point = Self::lsp_position_to_point(source, line, character)?;
 
         // Find the node at this position
         let node = root.descendant_for_point_range(point, point)?;
@@ -735,8 +770,8 @@ impl ParserEngine {
                 {
                     // We're on the definition itself
                     return Some(DefinitionLocation {
-                        range: self.node_range(parent),
-                        selection_range: self.node_range(node),
+                        range: self.node_range(parent, source),
+                        selection_range: self.node_range(node, source),
                     });
                 }
                 "ldecl" | "struct" | "enumdef" | "mdefn" | "ecdecl"
@@ -745,8 +780,8 @@ impl ParserEngine {
                 {
                     // We're on the definition itself
                     return Some(DefinitionLocation {
-                        range: self.node_range(parent),
-                        selection_range: self.node_range(node),
+                        range: self.node_range(parent, source),
+                        selection_range: self.node_range(node, source),
                     });
                 }
                 _ => {}
@@ -759,16 +794,16 @@ impl ParserEngine {
         // Get the name node for selection range
         let name_range = self
             .get_definition_name_range(def_node, source_bytes)
-            .unwrap_or_else(|| self.node_range(def_node));
+            .unwrap_or_else(|| self.node_range(def_node, source));
 
         Some(DefinitionLocation {
-            range: self.node_range(def_node),
+            range: self.node_range(def_node, source),
             selection_range: name_range,
         })
     }
 
     /// Get the range of the name within a definition node.
-    fn get_definition_name_range(&self, node: Node, _source: &[u8]) -> Option<Range> {
+    fn get_definition_name_range(&self, node: Node, source: &[u8]) -> Option<Range> {
         let kind = node.kind();
 
         let name_node = match kind {
@@ -777,7 +812,7 @@ impl ParserEngine {
             _ => None,
         }?;
 
-        Some(self.node_range(name_node))
+        Some(self.node_range(name_node, source))
     }
 
     /// Get signature help for a function call at the given position.
@@ -793,11 +828,7 @@ impl ParserEngine {
         let root = tree.root_node();
         let source_bytes = source.as_bytes();
 
-        // Convert LSP position to tree-sitter point
-        let point = tree_sitter::Point {
-            row: line as usize,
-            column: character as usize,
-        };
+        let point = Self::lsp_position_to_point(source, line, character)?;
 
         // Find the node at this position
         let node = root.descendant_for_point_range(point, point)?;
@@ -1133,7 +1164,7 @@ impl ParserEngine {
                     let params = self.extract_params(node, source);
                     let return_type = self.get_type_text(node, source).unwrap_or_default();
                     let detail = format!("({}): {}", params, return_type);
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let doc = format!(
                         "Circuit function\n\n```compact\ncircuit {}{}\n```{}",
                         name, detail, doc_comment
@@ -1153,7 +1184,7 @@ impl ParserEngine {
                     let params = self.extract_params(node, source);
                     let return_type = self.get_type_text(node, source).unwrap_or_default();
                     let detail = format!("({}): {}", params, return_type);
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let doc = format!(
                         "External circuit\n\n```compact\ncircuit {}{}\n```{}",
                         name, detail, doc_comment
@@ -1173,7 +1204,7 @@ impl ParserEngine {
                     let params = self.extract_params(node, source);
                     let return_type = self.get_type_text(node, source).unwrap_or_default();
                     let detail = format!("({}): {}", params, return_type);
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let doc = format!(
                         "Witness function\n\n```compact\nwitness {}{}\n```{}",
                         name, detail, doc_comment
@@ -1190,7 +1221,7 @@ impl ParserEngine {
             // Struct definitions
             "struct" => {
                 if let Some(name) = self.get_field_text(node, "name", source) {
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let fields = self.extract_struct_fields(node, source);
                     let doc = if fields.is_empty() {
                         format!(
@@ -1217,7 +1248,7 @@ impl ParserEngine {
             // Enum definitions
             "enumdef" => {
                 if let Some(name) = self.get_field_text(node, "name", source) {
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let variants = self.extract_enum_variants(node, source);
                     let doc = if variants.is_empty() {
                         format!("Enum type\n\n```compact\nenum {}\n```{}", name, doc_comment)
@@ -1242,7 +1273,7 @@ impl ParserEngine {
             "ldecl" => {
                 if let Some(name) = self.get_field_text(node, "name", source) {
                     let type_text = self.get_field_text(node, "type", source);
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let detail = type_text.as_ref().map(|t| format!("ledger: {}", t));
                     let doc = format!(
                         "Ledger state\n\n```compact\nledger {}: {}\n```{}",
@@ -1262,7 +1293,7 @@ impl ParserEngine {
             // Module definitions
             "mdefn" => {
                 if let Some(name) = self.get_field_text(node, "name", source) {
-                    let location = self.node_to_symbol_location(node);
+                    let location = self.node_to_symbol_location(node, source);
                     let doc = format!(
                         "Module namespace\n\n```compact\nmodule {}\n```{}",
                         name, doc_comment
@@ -1331,7 +1362,7 @@ impl ParserEngine {
             };
             errors.push(SyntaxError {
                 message,
-                range: self.node_range(node),
+                range: self.node_range(node, source),
             });
         } else if node.is_missing() {
             // MISSING node - expected token not found
@@ -1339,7 +1370,7 @@ impl ParserEngine {
             let message = format!("Syntax error: missing {}", kind);
             errors.push(SyntaxError {
                 message,
-                range: self.node_range(node),
+                range: self.node_range(node, source),
             });
         }
 
@@ -1385,7 +1416,7 @@ impl ParserEngine {
                     .find(|n| n.kind() == "function_name")
                 {
                     tokens.push(SemanticToken {
-                        range: self.node_range(name_node),
+                        range: self.node_range(name_node, source),
                         token_type: SemanticTokenType::Function,
                         modifiers: vec![SemanticTokenModifier::Declaration],
                     });
@@ -1396,7 +1427,7 @@ impl ParserEngine {
             "struct" => {
                 if let Some(name) = node.child_by_field_name("name") {
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: SemanticTokenType::Struct,
                         modifiers: vec![SemanticTokenModifier::Declaration],
                     });
@@ -1407,7 +1438,7 @@ impl ParserEngine {
             "enumdef" => {
                 if let Some(name) = node.child_by_field_name("name") {
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: SemanticTokenType::Enum,
                         modifiers: vec![SemanticTokenModifier::Declaration],
                     });
@@ -1423,7 +1454,7 @@ impl ParserEngine {
                         // Skip the enum name itself
                         if Some(&text) != enum_name.as_ref() {
                             tokens.push(SemanticToken {
-                                range: self.node_range(child),
+                                range: self.node_range(child, source),
                                 token_type: SemanticTokenType::EnumMember,
                                 modifiers: vec![SemanticTokenModifier::Declaration],
                             });
@@ -1440,7 +1471,7 @@ impl ParserEngine {
                     // For simple identifiers, get the id field
                     if let Some(id) = pattern.child_by_field_name("id") {
                         tokens.push(SemanticToken {
-                            range: self.node_range(id),
+                            range: self.node_range(id, source),
                             token_type: SemanticTokenType::Parameter,
                             modifiers: vec![],
                         });
@@ -1454,7 +1485,7 @@ impl ParserEngine {
                 let is_struct_field = node.parent().map(|p| p.kind()) == Some("struct");
                 if let Some(name) = node.child_by_field_name("id") {
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: if is_struct_field {
                             SemanticTokenType::Property
                         } else {
@@ -1475,7 +1506,7 @@ impl ParserEngine {
                         vec![]
                     };
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: SemanticTokenType::Type,
                         modifiers,
                     });
@@ -1491,7 +1522,7 @@ impl ParserEngine {
                     let kind = child.kind();
                     if kind == "Boolean" || kind == "Field" {
                         tokens.push(SemanticToken {
-                            range: self.node_range(child),
+                            range: self.node_range(child, source),
                             token_type: SemanticTokenType::Type,
                             modifiers: vec![SemanticTokenModifier::DefaultLibrary],
                         });
@@ -1503,7 +1534,7 @@ impl ParserEngine {
             "mdefn" => {
                 if let Some(name) = node.child_by_field_name("name") {
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: SemanticTokenType::Namespace,
                         modifiers: vec![SemanticTokenModifier::Declaration],
                     });
@@ -1514,7 +1545,7 @@ impl ParserEngine {
             "ldecl" => {
                 if let Some(name) = node.child_by_field_name("name") {
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: SemanticTokenType::Property,
                         modifiers: vec![
                             SemanticTokenModifier::Declaration,
@@ -1536,7 +1567,7 @@ impl ParserEngine {
                         vec![SemanticTokenModifier::Declaration]
                     };
                     tokens.push(SemanticToken {
-                        range: self.node_range(name),
+                        range: self.node_range(name, source),
                         token_type: SemanticTokenType::Variable,
                         modifiers,
                     });
@@ -1587,7 +1618,7 @@ impl ParserEngine {
                 {
                     if self.node_text(name_node, source) == symbol_name {
                         refs.push(ReferenceLocation {
-                            range: self.node_range(name_node),
+                            range: self.node_range(name_node, source),
                             is_definition: true,
                         });
                     }
@@ -1597,7 +1628,7 @@ impl ParserEngine {
                 if let Some(name) = node.child_by_field_name("name") {
                     if self.node_text(name, source) == symbol_name {
                         refs.push(ReferenceLocation {
-                            range: self.node_range(name),
+                            range: self.node_range(name, source),
                             is_definition: true,
                         });
                     }
@@ -1607,7 +1638,7 @@ impl ParserEngine {
                 if let Some(name) = node.child_by_field_name("name") {
                     if self.node_text(name, source) == symbol_name {
                         refs.push(ReferenceLocation {
-                            range: self.node_range(name),
+                            range: self.node_range(name, source),
                             is_definition: true,
                         });
                     }
@@ -1631,7 +1662,7 @@ impl ParserEngine {
                 if let Some(id) = node.child_by_field_name("id") {
                     if self.node_text(id, source) == symbol_name {
                         refs.push(ReferenceLocation {
-                            range: self.node_range(id),
+                            range: self.node_range(id, source),
                             is_definition: false,
                         });
                     }
@@ -1662,7 +1693,7 @@ impl ParserEngine {
         let text = self.node_text(fun_node, source);
         if text == symbol_name {
             refs.push(ReferenceLocation {
-                range: self.node_range(fun_node),
+                range: self.node_range(fun_node, source),
                 is_definition: false,
             });
         }
@@ -1739,10 +1770,7 @@ impl ParserEngine {
         let root = tree.root_node();
         let source_bytes = source.as_bytes();
 
-        let point = tree_sitter::Point {
-            row: line as usize,
-            column: character as usize,
-        };
+        let point = Self::lsp_position_to_point(source, line, character)?;
 
         // Find the deepest node at this position
         let node = root.descendant_for_point_range(point, point)?;
@@ -1768,7 +1796,7 @@ impl ParserEngine {
         let base_node = parent.child_by_field_name("base")?;
         let base_name = self.extract_base_identifier(base_node, source_bytes)?;
         let member_name = self.node_text(node, source_bytes);
-        let member_range = self.node_range(node);
+        let member_range = self.node_range(node, source);
 
         Some(MemberAccessContext {
             base_name,
@@ -1909,6 +1937,37 @@ circuit test(): Field {
         assert!(info.is_some());
         let info = info.unwrap();
         assert!(info.content.contains("circuit"));
+    }
+
+    #[test]
+    fn lsp_positions_use_utf16_while_tree_sitter_uses_utf8_bytes() {
+        let mut parser = ParserEngine::new();
+        let source = "/* 😀 */ circuit add(): Field { return 1; }";
+
+        let symbols = parser.document_symbols(source);
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0].range.start.character, 9);
+
+        let hover = parser
+            .hover_info(source, 0, 18)
+            .expect("UTF-16 cursor should resolve the circuit name");
+        assert!(hover.content.contains("Circuit function"));
+
+        let function_token = parser
+            .get_semantic_tokens(source)
+            .into_iter()
+            .find(|token| token.token_type == SemanticTokenType::Function)
+            .expect("circuit name should have a semantic token");
+        assert_eq!(function_token.range.start.character, 17);
+        assert_eq!(function_token.range.end.character, 20);
+    }
+
+    #[test]
+    fn lsp_position_inside_surrogate_pair_is_rejected() {
+        let mut parser = ParserEngine::new();
+        let source = "/* 😀 */ circuit add(): Field { return 1; }";
+
+        assert!(parser.hover_info(source, 0, 4).is_none());
     }
 
     #[test]

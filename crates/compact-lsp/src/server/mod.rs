@@ -110,7 +110,9 @@ impl CompactLanguageServer {
         let content = match self.documents.get(&uri.to_string()) {
             Some(doc) => doc.content.to_string(),
             None => {
-                let path = uri.path().as_str();
+                let Some(path) = imports::file_uri_to_path(&uri.to_string()) else {
+                    return;
+                };
                 match std::fs::read_to_string(path) {
                     Ok(content) => content,
                     Err(_) => return,
@@ -233,7 +235,7 @@ impl CompactLanguageServer {
             }
         };
 
-        let root_path = match root.strip_prefix("file://") {
+        let root_path = match imports::file_uri_to_path(&root) {
             Some(path) => path,
             None => {
                 tracing::warn!("Workspace root is not a file URI: {}", root);
@@ -241,17 +243,20 @@ impl CompactLanguageServer {
             }
         };
 
-        tracing::info!("Scanning workspace for .compact files: {}", root_path);
+        tracing::info!(
+            "Scanning workspace for .compact files: {}",
+            root_path.display()
+        );
 
         let mut files_found = 0;
         let mut symbols_found = 0;
 
-        if let Ok(entries) = workspace::find_compact_files(root_path) {
+        if let Ok(entries) = workspace::find_compact_files(&root_path) {
             for file_path in entries {
                 let content = match std::fs::read_to_string(&file_path) {
                     Ok(content) => content,
                     Err(e) => {
-                        tracing::warn!("Failed to read {}: {}", file_path, e);
+                        tracing::warn!("Failed to read {}: {}", file_path.display(), e);
                         continue;
                     }
                 };
@@ -261,12 +266,14 @@ impl CompactLanguageServer {
                     parser.get_completion_symbols(&content)
                 };
 
-                let canonical_path = std::path::Path::new(&file_path)
-                    .canonicalize()
-                    .ok()
-                    .and_then(|p| p.to_str().map(|s| s.to_string()))
-                    .unwrap_or(file_path.clone());
-                let uri = format!("file://{}", canonical_path);
+                let canonical_path = file_path.canonicalize().unwrap_or(file_path);
+                let Some(uri) = imports::path_to_file_uri(&canonical_path) else {
+                    tracing::warn!(
+                        "Could not convert workspace path to a file URI: {}",
+                        canonical_path.display()
+                    );
+                    continue;
+                };
 
                 self.source_cache.insert(uri.clone(), content.clone());
 
@@ -497,10 +504,11 @@ impl LanguageServer for CompactLanguageServer {
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
+                position_encoding: Some(PositionEncodingKind::UTF16),
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::INCREMENTAL),
+                        change: Some(TextDocumentSyncKind::FULL),
                         save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                             include_text: Some(false),
                         })),
@@ -643,25 +651,40 @@ impl LanguageServer for CompactLanguageServer {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let uri_string = uri.to_string();
+        let version = params.text_document.version;
 
-        if let Some(mut doc) = self.documents.get_mut(&uri_string) {
-            for change in params.content_changes {
-                if let Some(range) = change.range {
-                    let start_line = range.start.line as usize;
-                    let start_char = range.start.character as usize;
-                    let end_line = range.end.line as usize;
-                    let end_char = range.end.character as usize;
+        if params
+            .content_changes
+            .iter()
+            .any(|change| change.range.is_some())
+        {
+            tracing::warn!(
+                "Ignoring incremental change for {} because the server negotiated full sync",
+                uri_string
+            );
+            return;
+        }
 
-                    let start_idx = doc.content.line_to_char(start_line) + start_char;
-                    let end_idx = doc.content.line_to_char(end_line) + end_char;
+        let Some(change) = params.content_changes.last() else {
+            tracing::warn!("Ignoring empty document change for {}", uri_string);
+            return;
+        };
 
-                    doc.content.remove(start_idx..end_idx);
-                    doc.content.insert(start_idx, &change.text);
-                } else {
-                    doc.content = Rope::from_str(&change.text);
-                }
+        let updated = match self.documents.get_mut(&uri_string) {
+            Some(mut document) => document.replace_if_newer(version, &change.text),
+            None => {
+                tracing::warn!("Ignoring change for unopened document {}", uri_string);
+                return;
             }
-            doc.version = params.text_document.version;
+        };
+
+        if !updated {
+            tracing::warn!(
+                "Ignoring stale document change for {} at version {}",
+                uri_string,
+                version
+            );
+            return;
         }
 
         self.publish_syntax_diagnostics(uri.clone()).await;
@@ -1263,18 +1286,12 @@ impl LanguageServer for CompactLanguageServer {
             return Ok(Some(vec![]));
         }
 
-        let line_count = content.lines().count();
-        let last_line = content.lines().last().unwrap_or("");
-
         let range = Range {
             start: Position {
                 line: 0,
                 character: 0,
             },
-            end: Position {
-                line: line_count as u32,
-                character: last_line.len() as u32,
-            },
+            end: utils::document_end_position(&content),
         };
 
         Ok(Some(vec![TextEdit {

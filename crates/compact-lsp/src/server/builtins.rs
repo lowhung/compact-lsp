@@ -11,7 +11,10 @@
 
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::OnceLock;
+
+use super::imports::path_to_file_uri;
 
 /// A built-in method available on a Compact type.
 pub struct BuiltinMethod {
@@ -130,7 +133,7 @@ pub fn extract_base_type(type_str: &str) -> &str {
 /// Information about a generated doc file for a built-in type.
 struct DocFileInfo {
     /// Absolute path to the generated markdown file.
-    path: String,
+    path: PathBuf,
     /// Method name → 0-based line number of its `### \`signature\`` heading.
     method_lines: HashMap<String, u32>,
 }
@@ -230,7 +233,7 @@ fn doc_cache() -> &'static HashMap<String, DocFileInfo> {
             cache.insert(
                 ptype.name.clone(),
                 DocFileInfo {
-                    path: file_path.to_string_lossy().into_owned(),
+                    path: file_path,
                     method_lines,
                 },
             );
@@ -246,7 +249,7 @@ fn doc_cache() -> &'static HashMap<String, DocFileInfo> {
 pub fn get_builtin_type_doc_location(type_name: &str) -> Option<BuiltinDocLocation> {
     let info = doc_cache().get(type_name)?;
     Some(BuiltinDocLocation {
-        uri: format!("file://{}", info.path),
+        uri: path_to_file_uri(&info.path)?,
         line: 0,
     })
 }
@@ -259,7 +262,7 @@ pub fn get_builtin_method_doc_location(
     let info = doc_cache().get(type_name)?;
     let &line = info.method_lines.get(method_name)?;
     Some(BuiltinDocLocation {
-        uri: format!("file://{}", info.path),
+        uri: path_to_file_uri(&info.path)?,
         line,
     })
 }
