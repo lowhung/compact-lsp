@@ -19,17 +19,26 @@ mod workspace;
 pub use state::Document;
 
 use std::str::FromStr;
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 
 use compact_analyzer::{
-    CompilerCompatibility, CompletionSymbol, DiagnosticEngine, FormatterEngine, ParserEngine,
+    CompilerCompatibility, CompletionSymbol, DiagnosticEngine, FormatterEngine, ImportInfo,
+    ParserEngine,
 };
 use dashmap::DashMap;
 use lsp_types::*;
 use ropey::Rope;
+use tokio::sync::Mutex as AsyncMutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::{Client, LanguageServer};
+
+struct IndexedWorkspaceFile {
+    uri: String,
+    content: String,
+    symbols: Vec<CompletionSymbol>,
+    imports: Vec<ImportInfo>,
+}
 
 /// The Compact Language Server.
 ///
@@ -54,8 +63,17 @@ pub struct CompactLanguageServer {
     /// The parser engine for tree-sitter based features.
     parser_engine: Arc<Mutex<ParserEngine>>,
 
-    /// Workspace root URI (captured from initialize params).
-    workspace_root: Arc<Mutex<Option<String>>>,
+    /// Workspace root URIs (captured from initialize params and folder changes).
+    workspace_roots: Arc<Mutex<Vec<String>>>,
+
+    /// Serializes full workspace scans while allowing the async runtime to keep serving.
+    workspace_scan: Arc<AsyncMutex<()>>,
+
+    /// Changes whenever a watched file or workspace folder invalidates a scan snapshot.
+    workspace_epoch: Arc<AtomicU64>,
+
+    /// Whether the client accepts dynamic watched-file registration.
+    supports_watched_files: Arc<AtomicBool>,
 
     /// Symbol cache for cross-file completion.
     symbol_cache: Arc<DashMap<String, Vec<CompletionSymbol>>>,
@@ -97,7 +115,10 @@ impl CompactLanguageServer {
             diagnostic_engine: Arc::new(diagnostic_engine),
             formatter_engine: Arc::new(formatter_engine),
             parser_engine: Arc::new(Mutex::new(parser_engine)),
-            workspace_root: Arc::new(Mutex::new(None)),
+            workspace_roots: Arc::new(Mutex::new(Vec::new())),
+            workspace_scan: Arc::new(AsyncMutex::new(())),
+            workspace_epoch: Arc::new(AtomicU64::new(0)),
+            supports_watched_files: Arc::new(AtomicBool::new(false)),
             symbol_cache: Arc::new(DashMap::new()),
             source_cache: Arc::new(DashMap::new()),
             pending_diagnostics: Arc::new(DashMap::new()),
@@ -113,7 +134,7 @@ impl CompactLanguageServer {
                 let Some(path) = imports::file_uri_to_path(&uri.to_string()) else {
                     return;
                 };
-                match std::fs::read_to_string(path) {
+                match tokio::fs::read_to_string(path).await {
                     Ok(content) => content,
                     Err(_) => return,
                 }
@@ -224,48 +245,65 @@ impl CompactLanguageServer {
 
     /// Scan workspace for all .compact files and cache their symbols.
     async fn scan_workspace(&self) {
-        let root = {
-            let guard = self.workspace_root.lock().unwrap();
-            match guard.as_ref() {
-                Some(uri) => uri.clone(),
-                None => {
-                    tracing::warn!("No workspace root set, skipping workspace scan");
-                    return;
-                }
-            }
-        };
+        let _scan_guard = self.workspace_scan.lock().await;
 
-        let root_path = match imports::file_uri_to_path(&root) {
-            Some(path) => path,
-            None => {
-                tracing::warn!("Workspace root is not a file URI: {}", root);
+        loop {
+            let roots = self.workspace_roots.lock().unwrap().clone();
+            if roots.is_empty() {
+                tracing::warn!("No workspace roots set, skipping workspace scan");
                 return;
             }
-        };
 
-        tracing::info!(
-            "Scanning workspace for .compact files: {}",
-            root_path.display()
-        );
-
-        let mut files_found = 0;
-        let mut symbols_found = 0;
-
-        if let Ok(entries) = workspace::find_compact_files(&root_path) {
-            for file_path in entries {
-                let content = match std::fs::read_to_string(&file_path) {
-                    Ok(content) => content,
-                    Err(e) => {
-                        tracing::warn!("Failed to read {}: {}", file_path.display(), e);
-                        continue;
+            let epoch = self.workspace_epoch.load(Ordering::Acquire);
+            let indexed_files =
+                match tokio::task::spawn_blocking(move || Self::index_workspace_roots(roots)).await
+                {
+                    Ok(files) => files,
+                    Err(error) => {
+                        tracing::error!("Workspace indexing task failed: {}", error);
+                        return;
                     }
                 };
 
-                let symbols = {
-                    let mut parser = self.parser_engine.lock().unwrap();
-                    parser.get_completion_symbols(&content)
-                };
+            if epoch != self.workspace_epoch.load(Ordering::Acquire) {
+                tracing::debug!("Workspace changed during indexing; restarting scan");
+                continue;
+            }
 
+            self.replace_workspace_index(indexed_files);
+            break;
+        }
+    }
+
+    fn index_workspace_roots(roots: Vec<String>) -> Vec<IndexedWorkspaceFile> {
+        let mut parser = ParserEngine::new();
+        let mut indexed = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for root in roots {
+            let Some(root_path) = imports::file_uri_to_path(&root) else {
+                tracing::warn!("Workspace root is not a file URI: {}", root);
+                continue;
+            };
+
+            tracing::info!(
+                "Scanning workspace for .compact files: {}",
+                root_path.display()
+            );
+
+            let entries = match workspace::find_compact_files(&root_path) {
+                Ok(entries) => entries,
+                Err(error) => {
+                    tracing::warn!(
+                        "Could not scan workspace root {}: {}",
+                        root_path.display(),
+                        error
+                    );
+                    continue;
+                }
+            };
+
+            for file_path in entries {
                 let canonical_path = file_path.canonicalize().unwrap_or(file_path);
                 let Some(uri) = imports::path_to_file_uri(&canonical_path) else {
                     tracing::warn!(
@@ -274,67 +312,188 @@ impl CompactLanguageServer {
                     );
                     continue;
                 };
-
-                self.source_cache.insert(uri.clone(), content.clone());
-
-                let symbol_count = symbols.len();
-                if symbol_count > 0 {
-                    self.symbol_cache.insert(uri.clone(), symbols);
-                    symbols_found += symbol_count;
+                if !seen.insert(uri.clone()) {
+                    continue;
                 }
 
-                self.update_reverse_dependencies(&uri, &content);
-                files_found += 1;
+                let content = match std::fs::read_to_string(&canonical_path) {
+                    Ok(content) => content,
+                    Err(error) => {
+                        tracing::warn!("Failed to read {}: {}", canonical_path.display(), error);
+                        continue;
+                    }
+                };
+
+                let symbols = parser.get_completion_symbols(&content);
+                let file_imports = parser.get_imports(&content);
+                indexed.push(IndexedWorkspaceFile {
+                    uri,
+                    content,
+                    symbols,
+                    imports: file_imports,
+                });
             }
         }
 
-        tracing::info!(
-            "Workspace scan complete: {} files, {} symbols cached",
-            files_found,
-            symbols_found
-        );
+        indexed
+    }
 
-        let dep_count: usize = self
+    fn replace_workspace_index(&self, indexed_files: Vec<IndexedWorkspaceFile>) {
+        self.source_cache.clear();
+        self.symbol_cache.clear();
+        self.reverse_dependencies.clear();
+
+        let files_found = indexed_files.len();
+        let symbols_found = indexed_files
+            .iter()
+            .map(|file| file.symbols.len())
+            .sum::<usize>();
+
+        for file in &indexed_files {
+            self.source_cache
+                .insert(file.uri.clone(), file.content.clone());
+            if !file.symbols.is_empty() {
+                self.symbol_cache
+                    .insert(file.uri.clone(), file.symbols.clone());
+            }
+        }
+
+        for file in indexed_files {
+            self.add_reverse_dependencies(&file.uri, &file.imports);
+        }
+
+        let open_documents: Vec<_> = self
+            .documents
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.content.to_string()))
+            .collect();
+        for (uri, content) in open_documents {
+            self.update_symbol_cache(&uri, &content);
+            self.update_reverse_dependencies(&uri, &content);
+        }
+
+        let dependency_count = self
             .reverse_dependencies
             .iter()
-            .map(|e| e.value().len())
-            .sum();
-        tracing::info!("Reverse dependencies: {} entries", dep_count);
+            .map(|entry| entry.value().len())
+            .sum::<usize>();
+        tracing::info!(
+            "Workspace scan complete: {} files, {} symbols, {} dependency edges",
+            files_found,
+            symbols_found,
+            dependency_count
+        );
+    }
+
+    fn normalized_file_uri(uri: &str) -> Option<String> {
+        let path = imports::file_uri_to_path(uri)?;
+        let normalized = path.canonicalize().ok().or_else(|| {
+            let parent = path.parent()?.canonicalize().ok()?;
+            Some(parent.join(path.file_name()?))
+        });
+        let normalized = normalized.or_else(|| imports::normalize_path(&path))?;
+        imports::path_to_file_uri(&normalized)
+    }
+
+    fn cache_uri(uri: &str) -> String {
+        Self::normalized_file_uri(uri).unwrap_or_else(|| uri.to_string())
+    }
+
+    fn workspace_contains_uri(&self, uri: &str) -> bool {
+        let Some(path) =
+            Self::normalized_file_uri(uri).and_then(|uri| imports::file_uri_to_path(&uri))
+        else {
+            return false;
+        };
+        if path.extension().and_then(|extension| extension.to_str()) != Some("compact") {
+            return false;
+        }
+
+        self.workspace_roots.lock().unwrap().iter().any(|root| {
+            imports::file_uri_to_path(root)
+                .and_then(|root| {
+                    root.canonicalize()
+                        .ok()
+                        .or_else(|| imports::normalize_path(&root))
+                })
+                .map(|root| path.starts_with(root))
+                .unwrap_or(false)
+        })
+    }
+
+    async fn refresh_workspace_file(&self, uri: &str) -> Option<String> {
+        if !self.workspace_contains_uri(uri) {
+            return None;
+        }
+        let cache_uri = Self::normalized_file_uri(uri)?;
+
+        let content = if let Some(document) = self.documents.get(uri) {
+            document.content.to_string()
+        } else {
+            let path = imports::file_uri_to_path(uri)?;
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::debug!("Could not refresh workspace file {}: {}", uri, error);
+                    return None;
+                }
+            }
+        };
+
+        self.update_symbol_cache(&cache_uri, &content);
+        self.update_reverse_dependencies(&cache_uri, &content);
+        Some(cache_uri)
+    }
+
+    fn remove_workspace_file(&self, uri: &str) -> Vec<String> {
+        let uri = Self::cache_uri(uri);
+        self.source_cache.remove(&uri);
+        self.symbol_cache.remove(&uri);
+        self.remove_reverse_dependencies(&uri);
+        self.reverse_dependencies
+            .remove(&uri)
+            .map(|(_, dependents)| dependents)
+            .unwrap_or_default()
     }
 
     /// Update the symbol and source cache for a specific file.
     fn update_symbol_cache(&self, uri: &str, content: &str) {
+        let uri = Self::cache_uri(uri);
         let symbols = {
             let mut parser = self.parser_engine.lock().unwrap();
             parser.get_completion_symbols(content)
         };
 
-        self.source_cache
-            .insert(uri.to_string(), content.to_string());
+        self.source_cache.insert(uri.clone(), content.to_string());
 
         if symbols.is_empty() {
-            self.symbol_cache.remove(uri);
+            self.symbol_cache.remove(&uri);
         } else {
-            self.symbol_cache.insert(uri.to_string(), symbols);
+            self.symbol_cache.insert(uri, symbols);
         }
     }
 
     /// Update reverse dependencies for a file based on its imports.
     fn update_reverse_dependencies(&self, uri: &str, content: &str) {
-        self.remove_reverse_dependencies(uri);
+        let uri = Self::cache_uri(uri);
+        self.remove_reverse_dependencies(&uri);
 
         let file_imports = {
             let mut parser = self.parser_engine.lock().unwrap();
             parser.get_imports(content)
         };
 
+        self.add_reverse_dependencies(&uri, &file_imports);
+    }
+
+    fn add_reverse_dependencies(&self, uri: &str, file_imports: &[ImportInfo]) {
         for import in file_imports {
             if import.is_file {
                 if let Some(imported_uri) = imports::resolve_import_path(uri, &import.path) {
-                    self.reverse_dependencies
-                        .entry(imported_uri)
-                        .or_default()
-                        .push(uri.to_string());
+                    let mut dependents = self.reverse_dependencies.entry(imported_uri).or_default();
+                    if !dependents.iter().any(|dependent| dependent == uri) {
+                        dependents.push(uri.to_string());
+                    }
                 }
             }
         }
@@ -342,16 +501,18 @@ impl CompactLanguageServer {
 
     /// Remove a file from all reverse dependency lists.
     fn remove_reverse_dependencies(&self, uri: &str) {
+        let uri = Self::cache_uri(uri);
         for mut entry in self.reverse_dependencies.iter_mut() {
-            entry.value_mut().retain(|dep| dep != uri);
+            entry.value_mut().retain(|dependent| dependent != &uri);
         }
         self.reverse_dependencies.retain(|_, deps| !deps.is_empty());
     }
 
     /// Get all files that depend on (import) the given file.
     fn get_dependents(&self, uri: &str) -> Vec<String> {
+        let uri = Self::cache_uri(uri);
         self.reverse_dependencies
-            .get(uri)
+            .get(&uri)
             .map(|deps| deps.value().clone())
             .unwrap_or_default()
     }
@@ -444,6 +605,7 @@ impl CompactLanguageServer {
         defining_file: &str,
         symbol_name: &str,
     ) -> Vec<String> {
+        let defining_file = Self::cache_uri(defining_file);
         let mut names = Vec::new();
 
         let content = match self.source_cache.get(searching_file) {
@@ -477,6 +639,52 @@ impl CompactLanguageServer {
 
         names
     }
+
+    async fn register_workspace_file_watcher(&self) {
+        if !self.supports_watched_files.load(Ordering::Acquire) {
+            tracing::debug!("Client does not support dynamic watched-file registration");
+            return;
+        }
+
+        let options = DidChangeWatchedFilesRegistrationOptions {
+            watchers: vec![FileSystemWatcher {
+                glob_pattern: GlobPattern::String("**/*.compact".to_string()),
+                kind: Some(WatchKind::Create | WatchKind::Change | WatchKind::Delete),
+            }],
+        };
+        let register_options = match serde_json::to_value(options) {
+            Ok(options) => options,
+            Err(error) => {
+                tracing::warn!("Could not serialize watched-file registration: {}", error);
+                return;
+            }
+        };
+
+        if let Err(error) = self
+            .client
+            .register_capability(vec![Registration {
+                id: "compact-lsp-watch-compact-files".to_string(),
+                method: "workspace/didChangeWatchedFiles".to_string(),
+                register_options: Some(register_options),
+            }])
+            .await
+        {
+            tracing::warn!(
+                "Could not register Compact workspace file watcher: {}",
+                error
+            );
+        }
+    }
+
+    fn apply_workspace_folder_change(roots: &mut Vec<String>, event: WorkspaceFoldersChangeEvent) {
+        for removed in event.removed {
+            let removed = removed.uri.to_string();
+            roots.retain(|root| root != &removed);
+        }
+        roots.extend(event.added.into_iter().map(|folder| folder.uri.to_string()));
+        roots.sort();
+        roots.dedup();
+    }
 }
 
 /// Implementation of the Language Server Protocol.
@@ -484,23 +692,43 @@ impl LanguageServer for CompactLanguageServer {
     async fn initialize(&self, params: InitializeParams) -> Result<InitializeResult> {
         tracing::info!("Received initialize request");
 
-        let workspace_root = params
+        let supports_watched_files = params
+            .capabilities
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.did_change_watched_files)
+            .and_then(|capability| capability.dynamic_registration)
+            .unwrap_or(false);
+        self.supports_watched_files
+            .store(supports_watched_files, Ordering::Release);
+
+        let mut workspace_roots: Vec<String> = params
             .workspace_folders
             .as_ref()
-            .and_then(|folders| folders.first())
-            .map(|f| f.uri.to_string())
-            .or_else(|| {
-                #[allow(deprecated)]
-                params.root_uri.as_ref().map(|u| u.to_string())
-            });
-
-        if let Some(root_str) = workspace_root {
-            tracing::info!("Workspace root: {}", root_str);
-            let mut guard = self.workspace_root.lock().unwrap();
-            *guard = Some(root_str);
-        } else {
-            tracing::warn!("No workspace root provided by client");
+            .map(|folders| {
+                folders
+                    .iter()
+                    .map(|folder| folder.uri.to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if workspace_roots.is_empty() {
+            #[allow(deprecated)]
+            if let Some(root_uri) = params.root_uri.as_ref() {
+                workspace_roots.push(root_uri.to_string());
+            }
         }
+        workspace_roots.sort();
+        workspace_roots.dedup();
+
+        if workspace_roots.is_empty() {
+            tracing::warn!("No workspace root provided by client");
+        } else {
+            for root in &workspace_roots {
+                tracing::info!("Workspace root: {}", root);
+            }
+        }
+        *self.workspace_roots.lock().unwrap() = workspace_roots;
 
         Ok(InitializeResult {
             capabilities: ServerCapabilities {
@@ -567,6 +795,13 @@ impl LanguageServer for CompactLanguageServer {
                         },
                     ),
                 ),
+                workspace: Some(WorkspaceServerCapabilities {
+                    workspace_folders: Some(WorkspaceFoldersServerCapabilities {
+                        supported: Some(true),
+                        change_notifications: Some(OneOf::Left(true)),
+                    }),
+                    file_operations: None,
+                }),
                 ..Default::default()
             },
             server_info: Some(ServerInfo {
@@ -621,6 +856,7 @@ impl LanguageServer for CompactLanguageServer {
             }
         }
 
+        self.register_workspace_file_watcher().await;
         self.scan_workspace().await;
         self.client
             .log_message(MessageType::INFO, "Compact LSP server ready")
@@ -632,19 +868,73 @@ impl LanguageServer for CompactLanguageServer {
         Ok(())
     }
 
+    async fn did_change_workspace_folders(&self, params: DidChangeWorkspaceFoldersParams) {
+        {
+            let mut roots = self.workspace_roots.lock().unwrap();
+            Self::apply_workspace_folder_change(&mut roots, params.event);
+        }
+
+        self.workspace_epoch.fetch_add(1, Ordering::AcqRel);
+        self.scan_workspace().await;
+    }
+
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams) {
+        self.workspace_epoch.fetch_add(1, Ordering::AcqRel);
+        let mut affected_dependents = std::collections::HashSet::new();
+
+        for change in params.changes {
+            let uri = change.uri.to_string();
+            if !self.workspace_contains_uri(&uri) {
+                continue;
+            }
+
+            let dependents = if change.typ == FileChangeType::DELETED {
+                if self.documents.contains_key(&uri) {
+                    self.refresh_workspace_file(&uri)
+                        .await
+                        .map(|cache_uri| self.get_dependents(&cache_uri))
+                        .unwrap_or_default()
+                } else {
+                    Self::normalized_file_uri(&uri)
+                        .map(|cache_uri| self.remove_workspace_file(&cache_uri))
+                        .unwrap_or_default()
+                }
+            } else {
+                match self.refresh_workspace_file(&uri).await {
+                    Some(cache_uri) => self.get_dependents(&cache_uri),
+                    None => Self::normalized_file_uri(&uri)
+                        .map(|cache_uri| self.remove_workspace_file(&cache_uri))
+                        .unwrap_or_default(),
+                }
+            };
+            affected_dependents.extend(dependents);
+        }
+
+        for dependent in affected_dependents {
+            if !self.documents.contains_key(&dependent) {
+                continue;
+            }
+            if let Ok(uri) = dependent.parse::<Uri>() {
+                self.publish_diagnostics(uri).await;
+            }
+        }
+    }
+
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         tracing::debug!("Document opened: {}", uri);
 
         let rope = Rope::from_str(&params.text_document.text);
         self.documents.insert(
-            uri,
+            uri.clone(),
             Document {
                 content: rope,
                 version: params.text_document.version,
             },
         );
 
+        self.update_symbol_cache(&uri, &params.text_document.text);
+        self.update_reverse_dependencies(&uri, &params.text_document.text);
         self.publish_diagnostics(params.text_document.uri).await;
     }
 
@@ -693,6 +983,8 @@ impl LanguageServer for CompactLanguageServer {
             Some(doc) => doc.content.to_string(),
             None => return,
         };
+        self.update_symbol_cache(&uri_string, &content);
+        self.update_reverse_dependencies(&uri_string, &content);
         self.schedule_semantic_diagnostics(uri, content).await;
     }
 
@@ -730,6 +1022,14 @@ impl LanguageServer for CompactLanguageServer {
         self.client
             .publish_diagnostics(params.text_document.uri, vec![], None)
             .await;
+
+        if self.refresh_workspace_file(&uri).await.is_none() {
+            if let Some(cache_uri) = Self::normalized_file_uri(&uri) {
+                self.remove_workspace_file(&cache_uri);
+            } else {
+                self.remove_workspace_file(&uri);
+            }
+        }
     }
 
     async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
@@ -1821,6 +2121,7 @@ impl LanguageServer for CompactLanguageServer {
                 Some(name) => name,
                 None => return Ok(None),
             };
+        let cache_uri = Self::cache_uri(&uri_string);
 
         let mut all_locations = Vec::new();
 
@@ -1841,12 +2142,12 @@ impl LanguageServer for CompactLanguageServer {
 
         for entry in self.source_cache.iter() {
             let file_uri = entry.key();
-            if file_uri == &uri_string {
+            if file_uri == &cache_uri {
                 continue;
             }
 
             let file_content = entry.value();
-            let search_names = self.get_search_names_for_file(file_uri, &uri_string, &symbol_name);
+            let search_names = self.get_search_names_for_file(file_uri, &cache_uri, &symbol_name);
 
             for search_name in search_names {
                 let refs = {
@@ -1922,6 +2223,7 @@ impl LanguageServer for CompactLanguageServer {
                 Some(name) => name,
                 None => return Ok(None),
             };
+        let cache_uri = Self::cache_uri(&uri_string);
 
         if !validation::is_valid_identifier(&new_name) {
             return Err(tower_lsp::jsonrpc::Error::invalid_params(
@@ -1958,12 +2260,12 @@ impl LanguageServer for CompactLanguageServer {
 
         for entry in self.source_cache.iter() {
             let file_uri = entry.key();
-            if file_uri == &uri_string {
+            if file_uri == &cache_uri {
                 continue;
             }
 
             let file_content = entry.value();
-            let search_names = self.get_search_names_for_file(file_uri, &uri_string, &old_name);
+            let search_names = self.get_search_names_for_file(file_uri, &cache_uri, &old_name);
 
             for search_name in search_names {
                 let refs = {
@@ -2001,5 +2303,83 @@ impl LanguageServer for CompactLanguageServer {
             document_changes: None,
             change_annotations: None,
         }))
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn indexes_multiple_and_nested_workspace_roots_without_duplicates() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let contracts = first.path().join("contracts");
+        std::fs::create_dir_all(&contracts).unwrap();
+
+        std::fs::write(
+            contracts.join("Utility.compact"),
+            "circuit utility(): Field { return 1; }",
+        )
+        .unwrap();
+        std::fs::write(
+            contracts.join("Main.compact"),
+            "import \"./Utility\";\ncircuit main(): Field { return utility(); }",
+        )
+        .unwrap();
+        std::fs::write(
+            second.path().join("Other.compact"),
+            "circuit other(): Field { return 2; }",
+        )
+        .unwrap();
+
+        let roots = vec![
+            imports::path_to_file_uri(first.path()).unwrap(),
+            imports::path_to_file_uri(&contracts).unwrap(),
+            imports::path_to_file_uri(second.path()).unwrap(),
+        ];
+        let indexed = CompactLanguageServer::index_workspace_roots(roots);
+
+        assert_eq!(indexed.len(), 3);
+        assert!(indexed
+            .iter()
+            .any(|file| { file.symbols.iter().any(|symbol| symbol.name == "utility") }));
+        assert!(indexed.iter().any(
+            |file| file.symbols.iter().any(|symbol| symbol.name == "main")
+                && file.imports.iter().any(|import| import.path == "./Utility")
+        ));
+        assert!(indexed
+            .iter()
+            .any(|file| file.symbols.iter().any(|symbol| symbol.name == "other")));
+    }
+
+    #[test]
+    fn workspace_folder_changes_remove_add_and_deduplicate_roots() {
+        let first = Uri::from_str("file:///workspace/first").unwrap();
+        let second = Uri::from_str("file:///workspace/second").unwrap();
+        let third = Uri::from_str("file:///workspace/third").unwrap();
+        let mut roots = vec![first.to_string(), second.to_string()];
+
+        CompactLanguageServer::apply_workspace_folder_change(
+            &mut roots,
+            WorkspaceFoldersChangeEvent {
+                added: vec![
+                    WorkspaceFolder {
+                        uri: second.clone(),
+                        name: "second".into(),
+                    },
+                    WorkspaceFolder {
+                        uri: third.clone(),
+                        name: "third".into(),
+                    },
+                ],
+                removed: vec![WorkspaceFolder {
+                    uri: first,
+                    name: "first".into(),
+                }],
+            },
+        );
+
+        assert_eq!(roots, vec![second.to_string(), third.to_string()]);
     }
 }

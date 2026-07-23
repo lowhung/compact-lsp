@@ -13,8 +13,7 @@
 //! println!() for debugging. Instead, we use the `tracing` crate
 //! which writes to stderr.
 
-mod server;
-
+use compact_lsp::server;
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
