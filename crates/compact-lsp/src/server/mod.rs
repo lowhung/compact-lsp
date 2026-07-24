@@ -103,6 +103,12 @@ pub struct CompactLanguageServer {
 }
 
 impl CompactLanguageServer {
+    /// Build a preferred insertion quick fix for one trusted missing-token diagnostic.
+    ///
+    /// Only parser diagnostics with the exact `compact-syntax` source and message
+    /// prefix are considered. The token must also pass [`Self::safe_missing_token`];
+    /// every other diagnostic returns `None` instead of turning arbitrary compiler
+    /// text into an editor-applied source edit.
     fn quick_fix_for_missing_token(
         uri: &Uri,
         diagnostic: &Diagnostic,
@@ -145,6 +151,11 @@ impl CompactLanguageServer {
         )
     }
 
+    /// Map the parser's missing-token spelling to the punctuation safe to insert.
+    ///
+    /// This explicit allowlist excludes identifiers, keywords, and structured
+    /// syntax whose correct text or location cannot be inferred from one
+    /// diagnostic. Unknown spellings return `None`.
     fn safe_missing_token(kind: &str) -> Option<&'static str> {
         match kind {
             ";" => Some(";"),
@@ -162,6 +173,11 @@ impl CompactLanguageServer {
         }
     }
 
+    /// Return whether an LSP code-action request includes quick fixes.
+    ///
+    /// An absent `only` filter requests every supported action kind. When the
+    /// filter is present, this first implementation accepts only the exact
+    /// `quickfix` kind because it does not yet advertise child quick-fix kinds.
     fn quick_fixes_requested(params: &CodeActionParams) -> bool {
         match params.context.only.as_ref() {
             None => true,
@@ -1796,6 +1812,11 @@ impl LanguageServer for CompactLanguageServer {
         Ok(Some(CompletionResponse::Array(items)))
     }
 
+    /// Convert eligible request diagnostics into conservative punctuation quick fixes.
+    ///
+    /// Diagnostics are evaluated independently and unsafe entries are omitted.
+    /// The handler returns an empty response for unsupported action-kind filters
+    /// rather than executing edits or guessing at compiler intent.
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
         if !Self::quick_fixes_requested(&params) {
             return Ok(Some(Vec::new()));

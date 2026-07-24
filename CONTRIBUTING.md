@@ -70,6 +70,12 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 - Keep functions focused and small.
 - Add tests for new functionality.
 - Update documentation for user-visible behavior and configuration.
+- Add Rustdoc to public APIs and non-obvious private helpers. Explain the
+  function's purpose, important invariants, and why it returns no result or an
+  error instead of guessing.
+- Document protocol boundaries such as UTF-16 positions, half-open ranges,
+  version ordering, cancellation, ambiguity handling, and partial-syntax
+  fallbacks where they affect correctness.
 - Preserve the vendored grammar provenance and hashes when updating it.
 
 ### Commit Messages
