@@ -11,7 +11,10 @@ public beta. The server crates and VS Code extension share one version.
 3. Move the relevant changelog entries from `Unreleased` to the release
    version and date.
 4. Run the Rust and VS Code checks from `CONTRIBUTING.md`.
-5. Confirm the release version contract:
+5. Complete every row in the
+   [IDE client compatibility matrix](client-compatibility.md#release-evidence)
+   against the exact release commit.
+6. Confirm the release version contract:
 
    ```bash
    cargo metadata --locked --no-deps --format-version 1 \
@@ -19,14 +22,14 @@ public beta. The server crates and VS Code extension share one version.
    jq -r '.version' editors/vscode/package.json
    ```
 
-6. Confirm the latest automatic `Release` workflow run on `main` succeeded.
+7. Confirm the latest automatic `Release` workflow run on `main` succeeded.
    Every update to `main` executes the full verification, cross-platform build,
    packaging, artifact download, and checksum assembly without creating
    attestations or publishing a GitHub release. The workflow can also be run
    manually from `main` when needed. Download the
    `compact-lsp-release-dry-run-*` artifact and inspect its archives, VSIX, and
    `SHA256SUMS`.
-7. Create a Verified signed tag named `v<version>` and push it.
+8. Create a Verified signed tag named `v<version>` and push it.
 
 The tag starts `.github/workflows/release.yml`. The workflow rejects a tag that
 does not match both manifests. Only a matching `v*` tag creates attestations

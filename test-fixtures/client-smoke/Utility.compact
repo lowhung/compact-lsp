@@ -1,0 +1,6 @@
+pragma language_version >= 0.25;
+
+// Multiplies a value by a caller-supplied factor.
+export circuit scale(value: Field, factor: Field): Field {
+  return value * factor;
+}

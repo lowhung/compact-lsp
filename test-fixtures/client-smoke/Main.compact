@@ -1,0 +1,16 @@
+pragma language_version >= 0.25;
+
+import CompactStandardLibrary;
+import "./Utility" prefix Utils_;
+
+ledger rounds: Counter;
+
+// Adds two field elements so completion, hover, signatures, and rename share a target.
+export circuit add(left: Field, right: Field): Field {
+  return left + right;
+}
+
+export circuit demonstrate(value: Field): Field {
+  rounds.increment(1);
+  return Utils_scale(add(value, 2), 3);
+}

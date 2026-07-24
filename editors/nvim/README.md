@@ -55,6 +55,24 @@ vim.api.nvim_create_autocmd("FileType", {
 The Compact compiler is separate. Install the `compact` CLI and toolchain 0.33,
 or set `COMPACT_COMPILER` to a direct compiler binary before starting Neovim.
 
+## Compatibility smoke
+
+Contributors can exercise Neovim's real built-in LSP client against the shared
+fixture:
+
+```bash
+cargo build -p compact-lsp --locked
+COMPACT_LSP_SMOKE_SERVER="$PWD/target/debug/compact-lsp" \
+COMPACT_LSP_SMOKE_ROOT="$PWD/test-fixtures/client-smoke" \
+NVIM_LOG_FILE=/tmp/compact-lsp-nvim.log \
+XDG_STATE_HOME=/tmp/compact-lsp-nvim-state \
+  nvim --headless -i NONE -u editors/nvim/smoke.lua
+```
+
+The same Neovim 0.11.5 smoke runs in CI. See the
+[full client matrix](../../docs/client-compatibility.md) for its coverage and
+the manual release checklist.
+
 ## Features
 
 - **Diagnostics** - Compiler errors and warnings on save.
