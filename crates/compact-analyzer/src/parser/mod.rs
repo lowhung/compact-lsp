@@ -962,6 +962,75 @@ impl ParserEngine {
         None
     }
 
+    /// Collect syntactically complete calls for editor features such as inlay hints.
+    ///
+    /// Each argument position is converted from tree-sitter's byte column to the
+    /// UTF-16 column required by LSP. Calls with parser errors or missing nodes are
+    /// omitted so partially typed code cannot produce plausible-but-wrong hints.
+    pub fn call_sites(&mut self, source: &str) -> Vec<CallSite> {
+        let Some(tree) = self.parse(source) else {
+            return Vec::new();
+        };
+        let mut calls = Vec::new();
+        self.collect_call_sites(tree.root_node(), source.as_bytes(), &mut calls);
+        calls.sort_by_key(|call| {
+            call.arguments
+                .first()
+                .map(|argument| (argument.position.line, argument.position.character))
+                .unwrap_or((u32::MAX, u32::MAX))
+        });
+        calls
+    }
+
+    /// Walk the syntax tree once and append complete calls in source order.
+    fn collect_call_sites(&self, node: Node, source: &[u8], calls: &mut Vec<CallSite>) {
+        if matches!(node.kind(), "function_call_term" | "member_access_expr")
+            && !node.has_error()
+            && !node.is_missing()
+        {
+            if let Some(call) = self.call_site_from_node(node, source) {
+                calls.push(call);
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_call_sites(child, source, calls);
+        }
+    }
+
+    /// Convert a complete call node into the small, protocol-independent call model.
+    fn call_site_from_node(&self, node: Node, source: &[u8]) -> Option<CallSite> {
+        let (function_name, receiver) = match node.kind() {
+            "function_call_term" => (self.get_call_function_name(node, source)?, None),
+            "member_access_expr" => {
+                let member = node.child_by_field_name("member")?;
+                let base = node.child_by_field_name("base")?;
+                (
+                    self.node_text(member, source),
+                    Some(self.extract_base_identifier(base, source)?),
+                )
+            }
+            _ => return None,
+        };
+
+        let mut cursor = node.walk();
+        let arguments = node
+            .children_by_field_name("expr", &mut cursor)
+            .filter(|argument| !argument.has_error() && !argument.is_missing())
+            .map(|argument| CallArgument {
+                position: Self::point_to_lsp_position(source, argument.start_position()),
+                text: self.node_text(argument, source),
+            })
+            .collect();
+
+        Some(CallSite {
+            function_name,
+            receiver,
+            arguments,
+        })
+    }
+
     /// Count which parameter the cursor is in (0-based).
     fn count_active_parameter(
         &self,
@@ -1885,6 +1954,51 @@ impl Default for ParserEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn call_sites_report_nested_member_and_utf16_argument_positions() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+circuit add(left: Field, right: Field): Field { return left + right; }
+ledger rounds: Counter;
+circuit run(): Field {
+    rounds.increment(4);
+    /*😀*/ add(1, add(2, 3));
+    return 0;
+}";
+
+        let calls = parser.call_sites(source);
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| (call.receiver.as_deref(), call.function_name.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(Some("rounds"), "increment"), (None, "add"), (None, "add")]
+        );
+        assert_eq!(calls[0].arguments[0].text, "4");
+        assert_eq!(calls[1].arguments[0].text, "1");
+        assert_eq!(calls[1].arguments[1].text, "add(2, 3)");
+        assert_eq!(
+            calls[1].arguments[0].position,
+            Position {
+                line: 4,
+                character: 15
+            },
+            "the astral character before the call occupies two UTF-16 code units"
+        );
+    }
+
+    #[test]
+    fn call_sites_skip_incomplete_calls() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+circuit add(left: Field, right: Field): Field { return left + right; }
+circuit run(): Field {
+    add(1,
+}";
+
+        assert!(parser.call_sites(source).is_empty());
+    }
 
     #[test]
     fn test_parse_circuit() {

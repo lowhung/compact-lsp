@@ -18,6 +18,7 @@ mod workspace;
 
 pub use state::Document;
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -52,6 +53,16 @@ struct WorkspaceSymbolCandidate {
     uri: String,
     /// LSP payload returned to the client after sorting and deduplication.
     information: SymbolInformation,
+}
+
+/// Per-request declaration snapshot used to resolve inlay-hint signatures.
+///
+/// `None` marks an ambiguous or incomplete local function signature, allowing
+/// the resolver to distinguish it from a name that is absent locally. Ledger
+/// types come from the same analyzer pass, avoiding a reparse for every call.
+struct InlaySignatureIndex {
+    local_functions: HashMap<String, Option<String>>,
+    ledger_types: HashMap<String, String>,
 }
 
 /// The Compact Language Server.
@@ -718,6 +729,119 @@ impl CompactLanguageServer {
         }
     }
 
+    /// Resolve an exact call to parameter names without guessing between overloads.
+    ///
+    /// Local declarations take precedence over imports and the standard library. If
+    /// multiple local declarations have the same name, no hints are returned because
+    /// the tree-sitter analyzer cannot yet prove which declaration the compiler chose.
+    /// Member calls resolve through the receiver's ledger type, including `kernel`.
+    fn inlay_parameter_names(
+        &self,
+        current_uri: &str,
+        call: &compact_analyzer::CallSite,
+        index: &InlaySignatureIndex,
+        imports: &[ImportInfo],
+    ) -> Option<Vec<String>> {
+        let detail = if let Some(receiver) = &call.receiver {
+            let receiver_type = index
+                .ledger_types
+                .get(receiver)
+                .map(String::as_str)
+                .or_else(|| (receiver == "kernel").then_some("Kernel"))?;
+            let base_type = builtins::extract_base_type(receiver_type);
+            builtins::find_method_by_name(base_type, &call.function_name)?
+                .signature
+                .to_string()
+        } else {
+            match index.local_functions.get(&call.function_name) {
+                Some(Some(detail)) => detail.clone(),
+                Some(None) => return None,
+                None => {
+                    if let Some((_uri, symbol)) = self.find_imported_symbol_from_imports(
+                        current_uri,
+                        &call.function_name,
+                        imports,
+                    ) {
+                        symbol.detail?
+                    } else {
+                        stdlib::find_stdlib_circuit(&call.function_name)?
+                            .signature
+                            .to_string()
+                    }
+                }
+            }
+        };
+
+        Self::parameter_names_from_detail(&detail)
+    }
+
+    /// Build the reusable local signature and ledger-type snapshot for one request.
+    ///
+    /// Duplicate function declarations are recorded as ambiguous even if their
+    /// display signatures happen to match, because source order is not resolution.
+    fn inlay_signature_index(symbols: Vec<CompletionSymbol>) -> InlaySignatureIndex {
+        let mut local_functions = HashMap::new();
+        let mut ledger_types = HashMap::new();
+
+        for symbol in symbols {
+            match symbol.kind {
+                compact_analyzer::CompletionSymbolKind::Function => {
+                    local_functions
+                        .entry(symbol.name)
+                        .and_modify(|detail| *detail = None)
+                        .or_insert(symbol.detail);
+                }
+                compact_analyzer::CompletionSymbolKind::Variable => {
+                    if let Some(receiver_type) = symbol
+                        .detail
+                        .as_deref()
+                        .and_then(|detail| detail.strip_prefix("ledger: "))
+                    {
+                        ledger_types.insert(symbol.name, receiver_type.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        InlaySignatureIndex {
+            local_functions,
+            ledger_types,
+        }
+    }
+
+    /// Extract simple parameter identifiers from a display signature.
+    ///
+    /// Complex parameter patterns are intentionally rejected: displaying a partial
+    /// pattern as a name would turn a helpful hint into misleading source text.
+    fn parameter_names_from_detail(detail: &str) -> Option<Vec<String>> {
+        utils::parse_params_from_detail(detail)
+            .into_iter()
+            .map(|label| {
+                let (name, _) = label.split_once(':')?;
+                let name = name.trim();
+                let mut characters = name.chars();
+                let first = characters.next()?;
+                if !(first == '_' || first.is_ascii_alphabetic())
+                    || !characters
+                        .all(|character| character == '_' || character.is_ascii_alphanumeric())
+                {
+                    return None;
+                }
+                Some(name.to_string())
+            })
+            .collect()
+    }
+
+    /// Test whether a UTF-16 position is inside an LSP range.
+    ///
+    /// LSP ranges are start-inclusive and end-exclusive. Applying the requested
+    /// viewport range here avoids returning hints the editor will not render.
+    fn position_in_range(position: Position, range: Range) -> bool {
+        let key = |position: Position| (position.line, position.character);
+        key(position) >= key(range.start) && key(position) < key(range.end)
+    }
+
     /// Update reverse dependencies for a file based on its imports.
     fn update_reverse_dependencies(&self, uri: &str, content: &str) {
         let uri = Self::cache_uri(uri);
@@ -774,6 +898,19 @@ impl CompactLanguageServer {
             parser.get_imports(&content)
         };
 
+        self.find_imported_symbol_from_imports(current_uri, name, &file_imports)
+    }
+
+    /// Resolve a prefixed symbol against an already parsed import snapshot.
+    ///
+    /// Keeping this lookup separate lets bulk features such as inlay hints parse
+    /// imports once, while point queries can continue using `find_imported_symbol`.
+    fn find_imported_symbol_from_imports(
+        &self,
+        current_uri: &str,
+        name: &str,
+        file_imports: &[ImportInfo],
+    ) -> Option<(String, CompletionSymbol)> {
         for import in file_imports {
             if !import.is_file {
                 continue;
@@ -808,6 +945,37 @@ impl CompactLanguageServer {
         }
 
         None
+    }
+
+    /// Populate missing imported-symbol entries before a bulk editor request resolves them.
+    ///
+    /// Workspace indexing runs in the background, so an editor can request hints
+    /// immediately after opening a document. Reading only cache misses here removes
+    /// that startup race. Missing or unreadable imports remain unresolved and produce
+    /// no hint; they are reported through the normal diagnostic path.
+    async fn cache_missing_imports(&self, current_uri: &str, file_imports: &[ImportInfo]) {
+        for import in file_imports {
+            if !import.is_file {
+                continue;
+            }
+            let Some(imported_uri) = imports::resolve_import_path(current_uri, &import.path) else {
+                continue;
+            };
+            if self.symbol_cache.contains_key(&imported_uri) {
+                continue;
+            }
+            let Some(path) = imports::file_uri_to_path(&imported_uri) else {
+                continue;
+            };
+            match tokio::fs::read_to_string(path).await {
+                Ok(content) => self.update_symbol_cache(&imported_uri, &content),
+                Err(error) => tracing::debug!(
+                    "Could not load imported symbols for inlay hints from {}: {}",
+                    imported_uri,
+                    error
+                ),
+            }
+        }
     }
 
     /// Build a SignatureHelp response from SignatureInfo.
@@ -1011,6 +1179,12 @@ impl LanguageServer for CompactLanguageServer {
                     work_done_progress_options: Default::default(),
                 })),
                 document_highlight_provider: Some(OneOf::Left(true)),
+                inlay_hint_provider: Some(OneOf::Right(InlayHintServerCapabilities::Options(
+                    InlayHintOptions {
+                        resolve_provider: Some(false),
+                        work_done_progress_options: Default::default(),
+                    },
+                ))),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -2397,6 +2571,75 @@ impl LanguageServer for CompactLanguageServer {
         Ok(None)
     }
 
+    /// Return conservative parameter-name hints for complete calls in the requested range.
+    ///
+    /// A call must resolve to one known signature with exactly the observed arity.
+    /// Hints are suppressed for incomplete or ambiguous calls and when an argument
+    /// already has the same identifier as its parameter. Type hints are deferred
+    /// until compiler-backed inference is available.
+    async fn inlay_hint(&self, params: InlayHintParams) -> Result<Option<Vec<InlayHint>>> {
+        let uri = params.text_document.uri.to_string();
+        let content = match self.documents.get(&uri) {
+            Some(document) => document.content.to_string(),
+            None => return Ok(None),
+        };
+        let calls = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            parser.call_sites(&content)
+        };
+        let (index, imports) = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            (
+                Self::inlay_signature_index(parser.get_completion_symbols(&content)),
+                parser.get_imports(&content),
+            )
+        };
+        self.cache_missing_imports(&uri, &imports).await;
+        let mut hints = Vec::new();
+
+        for call in calls {
+            let Some(parameter_names) = self.inlay_parameter_names(&uri, &call, &index, &imports)
+            else {
+                continue;
+            };
+            if parameter_names.len() != call.arguments.len() {
+                continue;
+            }
+
+            for (argument, parameter_name) in call.arguments.iter().zip(parameter_names) {
+                if argument.text.trim() == parameter_name
+                    || !Self::position_in_range(argument.position, params.range)
+                {
+                    continue;
+                }
+                hints.push((
+                    argument.position,
+                    parameter_name.clone(),
+                    InlayHint {
+                        position: argument.position,
+                        label: format!("{parameter_name}:").into(),
+                        kind: Some(InlayHintKind::PARAMETER),
+                        text_edits: None,
+                        tooltip: Some(format!("Parameter `{parameter_name}`").into()),
+                        padding_left: None,
+                        padding_right: Some(true),
+                        data: None,
+                    },
+                ));
+            }
+        }
+
+        hints.sort_by(|left, right| {
+            (left.0.line, left.0.character, left.1.as_str()).cmp(&(
+                right.0.line,
+                right.0.character,
+                right.1.as_str(),
+            ))
+        });
+        hints.dedup_by(|left, right| left.0 == right.0 && left.1 == right.1);
+        Ok(Some(hints.into_iter().map(|(_, _, hint)| hint).collect()))
+    }
+
     async fn semantic_tokens_full(
         &self,
         params: SemanticTokensParams,
@@ -2790,6 +3033,37 @@ mod workspace_tests {
         assert_eq!(symbols[0].location.range.start.character, 4);
         assert_eq!(symbols[0].container_name.as_deref(), Some("A.compact"));
         assert_eq!(symbols[0].kind, SymbolKind::FUNCTION);
+    }
+
+    #[test]
+    fn inlay_parameter_names_accept_only_simple_identifiers() {
+        assert_eq!(
+            CompactLanguageServer::parameter_names_from_detail(
+                "send(input: QualifiedCoinInfo, recipient: Either<A, B>): SendResult"
+            ),
+            Some(vec!["input".to_string(), "recipient".to_string()])
+        );
+        assert_eq!(
+            CompactLanguageServer::parameter_names_from_detail("(#size: Field): Field"),
+            None
+        );
+    }
+
+    #[test]
+    fn inlay_ranges_are_start_inclusive_and_end_exclusive() {
+        let range = Range {
+            start: Position {
+                line: 2,
+                character: 4,
+            },
+            end: Position {
+                line: 3,
+                character: 0,
+            },
+        };
+
+        assert!(CompactLanguageServer::position_in_range(range.start, range));
+        assert!(!CompactLanguageServer::position_in_range(range.end, range));
     }
 }
 
