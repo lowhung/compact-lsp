@@ -10,8 +10,10 @@
 //! - Generated markdown doc files for go-to-definition
 
 use super::builtins::BuiltinDocLocation;
+use super::imports::path_to_file_uri;
 use serde::Deserialize;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 // ── Public data types ───────────────────────────────────────────────
@@ -158,12 +160,12 @@ pub fn all_stdlib_circuits() -> &'static [StdlibCircuit] {
 // ── Doc file generation ─────────────────────────────────────────────
 
 struct StructDocInfo {
-    path: String,
+    path: PathBuf,
     field_lines: HashMap<String, u32>,
 }
 
 struct CircuitsDocInfo {
-    path: String,
+    path: PathBuf,
     circuit_lines: HashMap<String, u32>,
 }
 
@@ -182,7 +184,7 @@ fn doc_cache() -> &'static StdlibDocCache {
             return StdlibDocCache {
                 structs: HashMap::new(),
                 circuits: CircuitsDocInfo {
-                    path: String::new(),
+                    path: PathBuf::new(),
                     circuit_lines: HashMap::new(),
                 },
             };
@@ -260,7 +262,7 @@ fn doc_cache() -> &'static StdlibDocCache {
             struct_cache.insert(
                 st.name.to_string(),
                 StructDocInfo {
-                    path: file_path.to_string_lossy().into_owned(),
+                    path: file_path,
                     field_lines,
                 },
             );
@@ -307,7 +309,7 @@ fn doc_cache() -> &'static StdlibDocCache {
         StdlibDocCache {
             structs: struct_cache,
             circuits: CircuitsDocInfo {
-                path: circuits_path.to_string_lossy().into_owned(),
+                path: circuits_path,
                 circuit_lines,
             },
         }
@@ -320,7 +322,7 @@ fn doc_cache() -> &'static StdlibDocCache {
 pub fn get_stdlib_struct_doc_location(name: &str) -> Option<BuiltinDocLocation> {
     let info = doc_cache().structs.get(name)?;
     Some(BuiltinDocLocation {
-        uri: format!("file://{}", info.path),
+        uri: path_to_file_uri(&info.path)?,
         line: 0,
     })
 }
@@ -334,7 +336,7 @@ pub fn get_stdlib_field_doc_location(
     let info = doc_cache().structs.get(struct_name)?;
     let &line = info.field_lines.get(field_name)?;
     Some(BuiltinDocLocation {
-        uri: format!("file://{}", info.path),
+        uri: path_to_file_uri(&info.path)?,
         line,
     })
 }
@@ -344,7 +346,7 @@ pub fn get_stdlib_circuit_doc_location(name: &str) -> Option<BuiltinDocLocation>
     let cache = doc_cache();
     let &line = cache.circuits.circuit_lines.get(name)?;
     Some(BuiltinDocLocation {
-        uri: format!("file://{}", cache.circuits.path),
+        uri: path_to_file_uri(&cache.circuits.path)?,
         line,
     })
 }

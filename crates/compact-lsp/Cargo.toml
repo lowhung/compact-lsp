@@ -29,6 +29,7 @@ tokio.workspace = true
 # JSON serialization - for any custom LSP message handling
 serde.workspace = true
 serde_json.workspace = true
+url.workspace = true
 
 # Document storage
 ropey.workspace = true      # Efficient text buffer for open documents
