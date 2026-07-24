@@ -123,8 +123,8 @@ Exit criteria:
 - Test upgrade and rollback between two server releases.
 - Triage all crash, data-loss, protocol-corruption, and false-diagnostic bugs as
   release blockers.
-- Establish upstream ownership for the LSP and maintained grammar, or document
-  the fork governance and release process explicitly.
+- Establish upstream ownership for the LSP and maintained grammar; until then,
+  use the documented fork governance and release process in `releasing.md`.
 
 Exit criteria:
 
