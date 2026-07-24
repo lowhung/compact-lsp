@@ -22,6 +22,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use compact_analyzer::{
     CompilerCompatibility, CompletionSymbol, DiagnosticEngine, FormatterEngine, ImportInfo,
@@ -65,6 +66,15 @@ struct InlaySignatureIndex {
     ledger_types: HashMap<String, String>,
 }
 
+/// One debounced semantic-diagnostic task tracked for an open document.
+///
+/// The generation prevents a task that finishes concurrently with replacement
+/// from removing or publishing over the newer task.
+struct PendingDiagnosticTask {
+    generation: u64,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 /// The Compact Language Server.
 ///
 /// This struct holds all the state needed by the server:
@@ -106,8 +116,11 @@ pub struct CompactLanguageServer {
     /// Source cache for cross-file hover and definition.
     source_cache: Arc<DashMap<String, String>>,
 
-    /// Pending semantic diagnostics tasks.
-    pending_diagnostics: Arc<DashMap<String, tokio::task::JoinHandle<()>>>,
+    /// Pending semantic diagnostics tasks, keyed by document URI.
+    pending_diagnostics: Arc<DashMap<String, PendingDiagnosticTask>>,
+
+    /// Monotonic identity for distinguishing replaced diagnostic tasks.
+    next_diagnostic_generation: Arc<AtomicU64>,
 
     /// Reverse dependency map for cross-file error propagation.
     reverse_dependencies: Arc<DashMap<String, Vec<String>>>,
@@ -231,23 +244,95 @@ impl CompactLanguageServer {
             symbol_cache: Arc::new(DashMap::new()),
             source_cache: Arc::new(DashMap::new()),
             pending_diagnostics: Arc::new(DashMap::new()),
+            next_diagnostic_generation: Arc::new(AtomicU64::new(1)),
             reverse_dependencies: Arc::new(DashMap::new()),
         }
     }
 
-    /// Publish diagnostics for a document.
+    /// Cancel and remove a document's pending semantic-diagnostic task.
+    ///
+    /// Aborting the Tokio task drops the compiler child configured with
+    /// `kill_on_drop`, so superseded compiler processes do not continue running.
+    fn cancel_pending_diagnostics(&self, uri: &str) {
+        if let Some((_, task)) = self.pending_diagnostics.remove(uri) {
+            task.handle.abort();
+        }
+    }
+
+    /// Cancel every pending diagnostic task during server shutdown.
+    fn cancel_all_pending_diagnostics(&self) {
+        let uris: Vec<_> = self
+            .pending_diagnostics
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        for uri in uris {
+            self.cancel_pending_diagnostics(&uri);
+        }
+    }
+
+    /// Return whether a document still has the version captured by a request.
+    fn document_version_matches(
+        documents: &DashMap<String, Document>,
+        uri: &str,
+        expected_version: i32,
+    ) -> bool {
+        documents
+            .get(uri)
+            .map(|document| document.version == expected_version)
+            .unwrap_or(false)
+    }
+
+    /// Verify both the document version and the task generation before publication.
+    ///
+    /// Checking the generation closes the race where an older task finishes just
+    /// as a newer task is inserted for the same document.
+    fn diagnostic_task_is_current(
+        pending: &DashMap<String, PendingDiagnosticTask>,
+        documents: &DashMap<String, Document>,
+        uri: &str,
+        generation: u64,
+        expected_version: i32,
+    ) -> bool {
+        pending
+            .get(uri)
+            .map(|task| task.generation == generation)
+            .unwrap_or(false)
+            && Self::document_version_matches(documents, uri, expected_version)
+    }
+
+    /// Remove task bookkeeping only when it still belongs to this generation.
+    fn clear_pending_diagnostic_if_current(
+        pending: &DashMap<String, PendingDiagnosticTask>,
+        uri: &str,
+        generation: u64,
+    ) {
+        pending.remove_if(uri, |_, task| task.generation == generation);
+    }
+
+    /// Publish diagnostics for a closed workspace file or schedule them for an open one.
+    ///
+    /// Open documents always use the tracked, cancellable task path, even on open
+    /// and save. Closed workspace files cannot receive edits, so they are compiled
+    /// directly from disk without an LSP version.
     async fn publish_diagnostics(&self, uri: Uri) {
-        let content = match self.documents.get(&uri.to_string()) {
-            Some(doc) => doc.content.to_string(),
-            None => {
-                let Some(path) = imports::file_uri_to_path(&uri.to_string()) else {
-                    return;
-                };
-                match tokio::fs::read_to_string(path).await {
-                    Ok(content) => content,
-                    Err(_) => return,
-                }
-            }
+        let uri_string = uri.to_string();
+        if let Some(document) = self.documents.get(&uri_string) {
+            let content = document.content.to_string();
+            let version = document.version;
+            drop(document);
+            self.publish_syntax_diagnostics(uri.clone()).await;
+            self.schedule_semantic_diagnostics(uri, content, version, Duration::ZERO)
+                .await;
+            return;
+        }
+
+        let Some(path) = imports::file_uri_to_path(&uri_string) else {
+            return;
+        };
+        let content = match tokio::fs::read_to_string(path).await {
+            Ok(content) => content,
+            Err(_) => return,
         };
 
         let syntax_diagnostics: Vec<Diagnostic> = {
@@ -278,10 +363,11 @@ impl CompactLanguageServer {
             .await;
     }
 
-    /// Publish syntax diagnostics for a document (instant, on every keystroke).
+    /// Publish versioned syntax diagnostics for the latest open-document snapshot.
     async fn publish_syntax_diagnostics(&self, uri: Uri) {
-        let content = match self.documents.get(&uri.to_string()) {
-            Some(doc) => doc.content.to_string(),
+        let uri_string = uri.to_string();
+        let (content, version) = match self.documents.get(&uri_string) {
+            Some(doc) => (doc.content.to_string(), doc.version),
             None => return,
         };
 
@@ -301,27 +387,55 @@ impl CompactLanguageServer {
             })
             .collect();
 
+        if !Self::document_version_matches(&self.documents, &uri_string, version) {
+            return;
+        }
         self.client
-            .publish_diagnostics(uri, diagnostics, None)
+            .publish_diagnostics(uri, diagnostics, Some(version))
             .await;
     }
 
-    /// Schedule semantic diagnostics with debounce.
-    async fn schedule_semantic_diagnostics(&self, uri: Uri, content: String) {
+    /// Schedule versioned semantic diagnostics after a short debounce.
+    ///
+    /// Replacement aborts the previous task and compiler child. The task checks
+    /// both its generation and document version before and after compilation, then
+    /// removes only its own bookkeeping entry.
+    async fn schedule_semantic_diagnostics(
+        &self,
+        uri: Uri,
+        content: String,
+        version: i32,
+        debounce: Duration,
+    ) {
         let uri_string = uri.to_string();
-
-        if let Some((_, handle)) = self.pending_diagnostics.remove(&uri_string) {
-            handle.abort();
-        }
+        self.cancel_pending_diagnostics(&uri_string);
+        let generation = self
+            .next_diagnostic_generation
+            .fetch_add(1, Ordering::AcqRel);
 
         let client = self.client.clone();
         let diagnostic_engine = self.diagnostic_engine.clone();
         let parser_engine = self.parser_engine.clone();
         let pending = self.pending_diagnostics.clone();
+        let documents = self.documents.clone();
         let uri_clone = uri_string.clone();
+        // A zero-debounce task can run on another worker immediately. Gate it
+        // until its generation is visible in the pending-task map.
+        let (start_sender, start_receiver) = tokio::sync::oneshot::channel();
 
         let handle = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            if start_receiver.await.is_err() {
+                return;
+            }
+            if !debounce.is_zero() {
+                tokio::time::sleep(debounce).await;
+            }
+            if !Self::diagnostic_task_is_current(
+                &pending, &documents, &uri_clone, generation, version,
+            ) {
+                Self::clear_pending_diagnostic_if_current(&pending, &uri_clone, generation);
+                return;
+            }
 
             let syntax_diagnostics: Vec<Diagnostic> = {
                 let mut parser = parser_engine.lock().unwrap();
@@ -345,11 +459,25 @@ impl CompactLanguageServer {
             let mut all_diagnostics = syntax_diagnostics;
             all_diagnostics.extend(compiler_diagnostics);
 
-            client.publish_diagnostics(uri, all_diagnostics, None).await;
-            pending.remove(&uri_clone);
+            if Self::diagnostic_task_is_current(
+                &pending, &documents, &uri_clone, generation, version,
+            ) {
+                client
+                    .publish_diagnostics(uri, all_diagnostics, Some(version))
+                    .await;
+            } else {
+                tracing::debug!(
+                    "Discarding stale semantic diagnostics for {} at version {}",
+                    uri_clone,
+                    version
+                );
+            }
+            Self::clear_pending_diagnostic_if_current(&pending, &uri_clone, generation);
         });
 
-        self.pending_diagnostics.insert(uri_string, handle);
+        self.pending_diagnostics
+            .insert(uri_string, PendingDiagnosticTask { generation, handle });
+        let _ = start_sender.send(());
     }
 
     /// Scan workspace for all .compact files and cache their symbols.
@@ -1296,6 +1424,7 @@ impl LanguageServer for CompactLanguageServer {
 
     async fn shutdown(&self) -> Result<()> {
         tracing::info!("Shutdown requested");
+        self.cancel_all_pending_diagnostics();
         Ok(())
     }
 
@@ -1354,6 +1483,7 @@ impl LanguageServer for CompactLanguageServer {
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
         tracing::debug!("Document opened: {}", uri);
+        self.cancel_pending_diagnostics(&uri);
 
         let rope = Rope::from_str(&params.text_document.text);
         self.documents.insert(
@@ -1399,6 +1529,7 @@ impl LanguageServer for CompactLanguageServer {
             return;
         }
 
+        self.cancel_pending_diagnostics(&uri_string);
         self.publish_syntax_diagnostics(uri.clone()).await;
 
         let content = match self.documents.get(&uri_string) {
@@ -1407,12 +1538,14 @@ impl LanguageServer for CompactLanguageServer {
         };
         self.update_symbol_cache(&uri_string, &content);
         self.update_reverse_dependencies(&uri_string, &content);
-        self.schedule_semantic_diagnostics(uri, content).await;
+        self.schedule_semantic_diagnostics(uri, content, version, Duration::from_millis(500))
+            .await;
     }
 
     async fn did_save(&self, params: DidSaveTextDocumentParams) {
         let uri = params.text_document.uri.clone();
         let uri_str = uri.to_string();
+        self.cancel_pending_diagnostics(&uri_str);
 
         if let Some(doc) = self.documents.get(&uri_str) {
             let content = doc.content.to_string();
@@ -1434,10 +1567,7 @@ impl LanguageServer for CompactLanguageServer {
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri.to_string();
-
-        if let Some((_, handle)) = self.pending_diagnostics.remove(&uri) {
-            handle.abort();
-        }
+        self.cancel_pending_diagnostics(&uri);
 
         self.documents.remove(&uri);
 
