@@ -119,10 +119,13 @@ size includes reserved address space and is not a substitute for RSS. Compare
 runs made on the same operating system, architecture, build profile, and
 similar machine load.
 
-### Apple Silicon baseline
+### Apple Silicon host baseline
 
 The following release-mode measurements were collected on 2026-07-24 from
-commit `6fa6bfc9f8993ce81a5b393768f308802e121059`:
+commit `6fa6bfc9f8993ce81a5b393768f308802e121059`. The host was Apple Silicon, but
+the Homebrew Rust toolchain produced an `x86_64-apple-darwin` server binary, so
+these figures describe that binary running under Rosetta rather than a native
+arm64 build:
 
 | Scenario | Observed RSS |
 |---|---:|
