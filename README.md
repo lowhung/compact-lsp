@@ -23,6 +23,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Hover** | Documentation for keywords, types, and symbols |
 | **Go to Definition** | Jump to symbol definitions (local and imported) |
 | **Find References** | Find all usages of a symbol (local and cross-file) |
+| **Document Highlights** | Highlight declarations and references under the cursor |
 | **Rename** | Rename symbols across the workspace |
 | **Workspace Symbols** | Search declarations across open and indexed Compact files |
 | **Signature Help** | Parameter hints while typing function calls |

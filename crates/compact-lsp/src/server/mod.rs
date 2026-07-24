@@ -994,6 +994,7 @@ impl LanguageServer for CompactLanguageServer {
                     resolve_provider: Some(false),
                     work_done_progress_options: Default::default(),
                 })),
+                document_highlight_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -1880,6 +1881,72 @@ impl LanguageServer for CompactLanguageServer {
         let symbols = Self::workspace_symbol_results(entries, &params.query);
 
         Ok(Some(WorkspaceSymbolResponse::Flat(symbols)))
+    }
+
+    /// Highlight resolved declarations and references inside the requested document.
+    ///
+    /// Parser definitions are reported as writes and usages as reads. A usage-only
+    /// result is returned only when the symbol resolves through an import, preventing
+    /// unresolved identifiers from being highlighted merely because their text matches.
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+        let content = match self.documents.get(&uri) {
+            Some(document) => document.content.to_string(),
+            None => return Ok(None),
+        };
+        let Some(symbol_name) =
+            utils::get_word_at_position(&content, position.line, position.character)
+        else {
+            return Ok(None);
+        };
+        if validation::is_keyword(&symbol_name) || validation::is_builtin_type(&symbol_name) {
+            return Ok(None);
+        }
+
+        let references = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            parser.find_references(&content, &symbol_name)
+        };
+        let is_resolved_locally = references.iter().any(|reference| reference.is_definition);
+        let is_resolved_import = self.find_imported_symbol(&uri, &symbol_name).is_some();
+        if !is_resolved_locally && !is_resolved_import {
+            return Ok(None);
+        }
+
+        let mut highlights: Vec<_> = references
+            .into_iter()
+            .map(|reference| DocumentHighlight {
+                range: reference.range,
+                kind: Some(if reference.is_definition {
+                    DocumentHighlightKind::WRITE
+                } else {
+                    DocumentHighlightKind::READ
+                }),
+            })
+            .collect();
+        highlights.sort_by_key(|highlight| {
+            (
+                highlight.range.start.line,
+                highlight.range.start.character,
+                highlight.range.end.line,
+                highlight.range.end.character,
+            )
+        });
+        highlights.dedup_by_key(|highlight| highlight.range);
+
+        if highlights.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(highlights))
+        }
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {

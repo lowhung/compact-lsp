@@ -261,10 +261,15 @@ async fn run_multi_root_file_lifecycle() {
     let new_path = root_a.join("New.compact");
     let other_path = root_b.join("Other.compact");
     let user_path = root_b.join("User.compact");
+    let highlight_path = root_a.join("Highlight.compact");
     let main_source =
         "import \"./Utility\";\nimport \"./New\";\ncircuit main(): Field { return utility(); }";
     let user_source = "import \"./Other\";\ncircuit user(): Field { return other(); }";
     let other_source = "circuit other(): Field { return 2; }";
+    let highlight_source = "\
+/*😀*/ circuit target(): Field { return 1; }
+circuit caller(): Field { return target(); }
+circuit unresolved_user(): Field { return missing(); }";
     std::fs::write(
         root_a.join("Utility.compact"),
         "circuit utility(): Field { return 1; }",
@@ -278,6 +283,7 @@ async fn run_multi_root_file_lifecycle() {
         "/*😀*/ circuit unicode_name(): Field { return 5; }",
     )
     .unwrap();
+    std::fs::write(&highlight_path, highlight_source).unwrap();
 
     let root_a_uri = file_uri(&root_a);
     let root_b_uri = file_uri(&root_b);
@@ -285,6 +291,7 @@ async fn run_multi_root_file_lifecycle() {
     let new_uri = file_uri(&new_path);
     let other_uri = file_uri(&other_path);
     let user_uri = file_uri(&user_path);
+    let highlight_uri = file_uri(&highlight_path);
     let mut lsp = LspHarness::start(&compiler).await;
 
     let initialize = lsp
@@ -321,6 +328,10 @@ async fn run_multi_root_file_lifecycle() {
     assert_eq!(
         initialize["capabilities"]["workspaceSymbolProvider"]["resolveProvider"],
         false
+    );
+    assert_eq!(
+        initialize["capabilities"]["documentHighlightProvider"],
+        true
     );
 
     lsp.notify("initialized", json!({})).await;
@@ -371,6 +382,18 @@ async fn run_multi_root_file_lifecycle() {
         }),
     )
     .await;
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": highlight_uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": highlight_source
+            }
+        }),
+    )
+    .await;
 
     assert!(lsp.completion_labels(&user_uri).await.contains("other"));
     assert!(!lsp.completion_labels(&main_uri).await.contains("fresh"));
@@ -390,6 +413,58 @@ async fn run_multi_root_file_lifecycle() {
     assert_eq!(
         unicode_symbol["location"]["range"]["start"]["character"], 7,
         "workspace symbol locations should use UTF-16 columns"
+    );
+    let highlights = lsp
+        .request(
+            "textDocument/documentHighlight",
+            json!({
+                "textDocument": { "uri": highlight_uri },
+                "position": { "line": 0, "character": 15 }
+            }),
+        )
+        .await;
+    assert_eq!(
+        highlights,
+        json!([
+            {
+                "range": {
+                    "start": { "line": 0, "character": 15 },
+                    "end": { "line": 0, "character": 21 }
+                },
+                "kind": 3
+            },
+            {
+                "range": {
+                    "start": { "line": 1, "character": 33 },
+                    "end": { "line": 1, "character": 39 }
+                },
+                "kind": 2
+            }
+        ])
+    );
+    assert_eq!(
+        lsp.request(
+            "textDocument/documentHighlight",
+            json!({
+                "textDocument": { "uri": highlight_uri },
+                "position": { "line": 0, "character": 8 }
+            }),
+        )
+        .await,
+        Value::Null,
+        "keywords should not produce document highlights"
+    );
+    assert_eq!(
+        lsp.request(
+            "textDocument/documentHighlight",
+            json!({
+                "textDocument": { "uri": highlight_uri },
+                "position": { "line": 2, "character": 44 }
+            }),
+        )
+        .await,
+        Value::Null,
+        "unresolved symbols should not produce document highlights"
     );
     let code_actions = lsp
         .request(
@@ -533,6 +608,11 @@ async fn run_multi_root_file_lifecycle() {
     lsp.notify(
         "textDocument/didClose",
         json!({ "textDocument": { "uri": other_uri } }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": highlight_uri } }),
     )
     .await;
     lsp.shutdown().await;
