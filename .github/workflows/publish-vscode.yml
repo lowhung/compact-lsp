@@ -1,0 +1,140 @@
+name: Publish VS Code extension
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing compact-lsp release tag, for example v0.2.0
+        required: true
+        type: string
+      target:
+        description: Registry to publish to
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - visual-studio-marketplace
+          - open-vsx
+      channel:
+        description: Visual Studio Marketplace release channel
+        required: true
+        default: pre-release
+        type: choice
+        options:
+          - pre-release
+          - stable
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-vscode-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.tag }} to ${{ inputs.target }}
+    runs-on: ubuntu-latest
+    environment: editor-marketplaces
+    steps:
+      - name: Validate tag input
+        shell: bash
+        run: |
+          if [[ ! "${{ inputs.tag }}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::tag must be a stable semantic version prefixed with v"
+            exit 1
+          fi
+
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install publishing tools
+        working-directory: editors/vscode
+        run: npm ci --ignore-scripts
+
+      - name: Download published VSIX and checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          mkdir release
+          gh release download "${{ inputs.tag }}" \
+            --pattern "compact-lsp-vscode-${{ inputs.tag }}.vsix" \
+            --pattern SHA256SUMS \
+            --dir release
+
+      - name: Verify release artifact contract
+        shell: bash
+        run: |
+          tag="${{ inputs.tag }}"
+          version="${tag#v}"
+          asset="compact-lsp-vscode-${tag}.vsix"
+          manifest_version="$(jq -r '.version' editors/vscode/package.json)"
+          package_name="$(unzip -p "release/${asset}" extension/package.json | jq -r '.name')"
+          package_publisher="$(unzip -p "release/${asset}" extension/package.json | jq -r '.publisher')"
+          package_version="$(unzip -p "release/${asset}" extension/package.json | jq -r '.version')"
+
+          test "${manifest_version}" = "${version}"
+          test "${package_name}" = "compact-lsp"
+          test "${package_publisher}" = "lowhung"
+          test "${package_version}" = "${version}"
+
+          checksum="$(awk -v asset="${asset}" '$2 == asset { print }' release/SHA256SUMS)"
+          test -n "${checksum}"
+          (
+            cd release
+            printf '%s\n' "${checksum}" | sha256sum --check -
+          )
+
+          echo "VSIX_PATH=${GITHUB_WORKSPACE}/release/${asset}" >> "${GITHUB_ENV}"
+
+      - name: Verify release provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh attestation verify "${VSIX_PATH}" --repo "${GITHUB_REPOSITORY}"
+
+      - name: Publish to Visual Studio Marketplace
+        if: inputs.target == 'both' || inputs.target == 'visual-studio-marketplace'
+        env:
+          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        working-directory: editors/vscode
+        shell: bash
+        run: |
+          if [[ -z "${VSCE_PAT}" ]]; then
+            echo "::error::VSCE_PAT is not configured"
+            exit 1
+          fi
+
+          channel_args=()
+          if [[ "${{ inputs.channel }}" == "pre-release" ]]; then
+            channel_args+=(--pre-release)
+          fi
+
+          npx --no-install vsce publish \
+            --packagePath "${VSIX_PATH}" \
+            --skip-duplicate \
+            "${channel_args[@]}"
+
+      - name: Publish to Open VSX
+        if: inputs.target == 'both' || inputs.target == 'open-vsx'
+        env:
+          OVSX_PAT: ${{ secrets.OVSX_PAT }}
+        working-directory: editors/vscode
+        shell: bash
+        run: |
+          if [[ -z "${OVSX_PAT}" ]]; then
+            echo "::error::OVSX_PAT is not configured"
+            exit 1
+          fi
+
+          npx --no-install ovsx publish "${VSIX_PATH}" \
+            --skip-duplicate

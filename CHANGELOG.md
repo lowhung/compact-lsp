@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Conservative linked editing for import prefixes and direct prefixed calls.
 - A conservative extract-local-value refactor delivered as a previewable
   workspace edit.
+- Manual Marketplace and Open VSX publication from the verified release VSIX.
 
 ### Changed
 

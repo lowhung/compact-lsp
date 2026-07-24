@@ -3,6 +3,10 @@
 This extension registers `.compact` files and starts `compact-lsp` for Compact
 0.33 projects.
 
+> **Beta:** This is a community-maintained extension and not an officially
+> supported Midnight Network component. Report compatibility problems with the
+> Compact compiler and language versions from the Compact output channel.
+
 ## Server installation
 
 At activation, the extension uses the first available option:

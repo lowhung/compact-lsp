@@ -1,7 +1,7 @@
 {
   "name": "compact-lsp",
   "displayName": "Compact Language Server",
-  "description": "Compact 0.33 language support powered by compact-lsp.",
+  "description": "Public-beta Compact 0.33 language support powered by compact-lsp.",
   "version": "0.2.0",
   "publisher": "lowhung",
   "license": "MIT",
@@ -148,6 +148,7 @@
     "@types/vscode": "1.91.0",
     "@vscode/vsce": "3.9.2",
     "esbuild": "0.28.1",
+    "ovsx": "1.0.2",
     "typescript": "7.0.2"
   }
 }
