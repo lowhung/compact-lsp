@@ -16,6 +16,8 @@ mod types;
 
 pub use types::*;
 
+use std::collections::{BTreeMap, HashSet};
+
 use lsp_types::{DocumentSymbol, FoldingRange, FoldingRangeKind, Position, Range, SymbolKind};
 use tree_sitter::{Node, Parser, Tree};
 
@@ -2033,6 +2035,197 @@ impl ParserEngine {
         })
     }
 
+    /// Return the import-prefix ranges that can be edited as one operation.
+    ///
+    /// Compact renders a prefixed import such as `prefix Utils_` directly into
+    /// call names such as `Utils_add()`. This method links the prefix
+    /// declaration with only the `Utils_` segment of complete, direct calls.
+    /// Every returned range therefore has identical text and length, as
+    /// required by the LSP linked-editing contract.
+    ///
+    /// The analysis deliberately returns `None` when resolution is ambiguous:
+    ///
+    /// - A prefix must be declared exactly once.
+    /// - A call must match exactly one declared prefix.
+    /// - A local circuit, external circuit, or witness with the complete call
+    ///   name must not exist.
+    /// - Member calls, incomplete syntax, and prefixes without a call are not
+    ///   linked.
+    ///
+    /// Positions and ranges use LSP UTF-16 code units. The requested position
+    /// must be inside a linked prefix range; positions in a call suffix do not
+    /// activate linked editing.
+    pub fn linked_import_prefix_ranges(
+        &mut self,
+        source: &str,
+        line: u32,
+        character: u32,
+    ) -> Option<Vec<Range>> {
+        let tree = self.parse(source)?;
+        let source_bytes = source.as_bytes();
+        let mut prefix_declarations = Vec::new();
+        let mut local_functions = HashSet::new();
+        let mut direct_calls = Vec::new();
+        self.collect_linked_import_candidates(
+            tree.root_node(),
+            source_bytes,
+            &mut prefix_declarations,
+            &mut local_functions,
+            &mut direct_calls,
+        );
+
+        let mut declarations_by_prefix: BTreeMap<String, Vec<Range>> = BTreeMap::new();
+        for (prefix, range) in prefix_declarations {
+            declarations_by_prefix
+                .entry(prefix)
+                .or_default()
+                .push(range);
+        }
+
+        let unique_declarations: Vec<_> = declarations_by_prefix
+            .into_iter()
+            .filter_map(|(prefix, ranges)| match ranges.as_slice() {
+                [range] => Some((prefix, *range)),
+                _ => None,
+            })
+            .collect();
+        let mut ranges_by_prefix: BTreeMap<String, Vec<Range>> = unique_declarations
+            .iter()
+            .map(|(prefix, range)| (prefix.clone(), vec![*range]))
+            .collect();
+
+        for (call_name, call_range) in direct_calls {
+            if local_functions.contains(&call_name) {
+                continue;
+            }
+
+            let matches: Vec<_> = unique_declarations
+                .iter()
+                .filter(|(prefix, _)| {
+                    call_name.len() > prefix.len() && call_name.starts_with(prefix)
+                })
+                .collect();
+            if matches.len() != 1 {
+                continue;
+            }
+
+            let prefix = &matches[0].0;
+            let range = Range {
+                start: call_range.start,
+                end: Position {
+                    line: call_range.start.line,
+                    character: call_range.start.character + prefix.encode_utf16().count() as u32,
+                },
+            };
+            if let Some(ranges) = ranges_by_prefix.get_mut(prefix) {
+                ranges.push(range);
+            }
+        }
+
+        let position = Position { line, character };
+        let mut matching_groups = ranges_by_prefix
+            .into_values()
+            .filter(|ranges| ranges.len() > 1)
+            .filter(|ranges| {
+                ranges
+                    .iter()
+                    .any(|range| Self::range_contains_position(*range, position))
+            });
+        let mut ranges = matching_groups.next()?;
+        if matching_groups.next().is_some() {
+            return None;
+        }
+
+        ranges.sort_by_key(|range| {
+            (
+                range.start.line,
+                range.start.character,
+                range.end.line,
+                range.end.character,
+            )
+        });
+        ranges.dedup();
+        (ranges.len() > 1).then_some(ranges)
+    }
+
+    /// Collect syntax facts used by conservative import-prefix linked editing.
+    ///
+    /// This performs one recursive walk over the already-parsed tree. It keeps
+    /// raw candidates separate so the caller can reject duplicate prefix
+    /// declarations and local-call collisions before creating LSP ranges.
+    fn collect_linked_import_candidates(
+        &self,
+        node: Node,
+        source: &[u8],
+        prefixes: &mut Vec<(String, Range)>,
+        local_functions: &mut HashSet<String>,
+        direct_calls: &mut Vec<(String, Range)>,
+    ) {
+        match node.kind() {
+            "idecl" => {
+                if let Some(prefix_node) = node
+                    .child_by_field_name("prefix")
+                    .and_then(|prefix| prefix.child_by_field_name("id"))
+                {
+                    prefixes.push((
+                        self.node_text(prefix_node, source),
+                        self.node_range(prefix_node, source),
+                    ));
+                }
+            }
+            "cdefn" | "edecl" | "wdecl" => {
+                if let Some(name) = self.get_function_name(node, source) {
+                    local_functions.insert(name);
+                }
+            }
+            "function_call_term" if !node.has_error() => {
+                if let Some(identifier) = Self::direct_call_identifier(node) {
+                    direct_calls.push((
+                        self.node_text(identifier, source),
+                        self.node_range(identifier, source),
+                    ));
+                }
+            }
+            _ => {}
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_linked_import_candidates(
+                child,
+                source,
+                prefixes,
+                local_functions,
+                direct_calls,
+            );
+        }
+    }
+
+    /// Return the identifier node for a complete direct call.
+    ///
+    /// Requiring the `fun` field to contain exactly one named `id` excludes
+    /// member calls and other callee forms that cannot be resolved safely from
+    /// syntax alone.
+    fn direct_call_identifier(node: Node) -> Option<Node> {
+        let function = node.child_by_field_name("fun")?;
+        (function.named_child_count() == 1)
+            .then(|| function.named_child(0))
+            .flatten()
+            .filter(|identifier| identifier.kind() == "id")
+    }
+
+    /// Test whether an LSP position lies inside a half-open LSP range.
+    ///
+    /// Linked prefix identifiers never span lines, but the comparison remains
+    /// general so the boundary rule is explicit: the start is included and the
+    /// end is excluded.
+    fn range_contains_position(range: Range, position: Position) -> bool {
+        let position = (position.line, position.character);
+        let start = (range.start.line, range.start.character);
+        let end = (range.end.line, range.end.character);
+        start <= position && position < end
+    }
+
     /// Get member access context at a cursor position.
     ///
     /// If the cursor is on `increment` in `round.increment(1)`, returns
@@ -3343,6 +3536,92 @@ circuit main(): Field {
             helpers_import.unwrap().prefix.as_deref(),
             Some("Help_"),
             "Should have Help_ prefix"
+        );
+    }
+
+    #[test]
+    fn linked_import_prefixes_include_declaration_and_direct_calls() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+import \"./Utils\" prefix Utils_;
+
+circuit main(): Field {
+    return /* 😀 */ Utils_add() + Utils_sub();
+}";
+
+        let declaration = parser
+            .linked_import_prefix_ranges(source, 0, 25)
+            .expect("prefix declaration should activate linked editing");
+        assert_eq!(declaration.len(), 3);
+        assert_eq!(
+            declaration,
+            parser
+                .linked_import_prefix_ranges(source, 3, 24)
+                .expect("first prefixed call should activate the same group")
+        );
+        assert_eq!(declaration[0].start, Position::new(0, 24));
+        assert_eq!(declaration[0].end, Position::new(0, 30));
+        assert_eq!(
+            declaration[1].start.character, 20,
+            "the emoji before the call must count as two UTF-16 code units"
+        );
+        assert!(
+            parser.linked_import_prefix_ranges(source, 3, 27).is_none(),
+            "the call suffix must not activate linked editing"
+        );
+    }
+
+    #[test]
+    fn linked_import_prefixes_reject_ambiguous_or_local_calls() {
+        let mut parser = ParserEngine::new();
+        let local_collision = "\
+import \"./Utils\" prefix Utils_;
+circuit Utils_add(): Field { return 1; }
+circuit main(): Field { return Utils_add(); }";
+        assert!(
+            parser
+                .linked_import_prefix_ranges(local_collision, 2, 32)
+                .is_none(),
+            "a complete local declaration makes the call unsafe to link"
+        );
+
+        let duplicate_prefix = "\
+import \"./One\" prefix Shared_;
+import \"./Two\" prefix Shared_;
+circuit main(): Field { return Shared_run(); }";
+        assert!(
+            parser
+                .linked_import_prefix_ranges(duplicate_prefix, 2, 32)
+                .is_none(),
+            "duplicate prefix declarations are ambiguous"
+        );
+
+        let overlapping_prefixes = "\
+import \"./A\" prefix A_;
+import \"./AB\" prefix A_B_;
+circuit main(): Field { return A_B_run(); }";
+        assert!(
+            parser
+                .linked_import_prefix_ranges(overlapping_prefixes, 2, 32)
+                .is_none(),
+            "a call matching multiple declared prefixes is ambiguous"
+        );
+    }
+
+    #[test]
+    fn linked_import_prefixes_require_a_complete_use() {
+        let mut parser = ParserEngine::new();
+        let no_use = "import \"./Utils\" prefix Utils_;";
+        assert!(parser.linked_import_prefix_ranges(no_use, 0, 25).is_none());
+
+        let incomplete = "\
+import \"./Utils\" prefix Utils_;
+circuit main(): Field { return Utils_(; }";
+        assert!(
+            parser
+                .linked_import_prefix_ranges(incomplete, 0, 25)
+                .is_none(),
+            "incomplete calls must not create linked ranges"
         );
     }
 

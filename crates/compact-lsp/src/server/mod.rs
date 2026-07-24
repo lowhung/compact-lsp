@@ -1489,6 +1489,9 @@ impl LanguageServer for CompactLanguageServer {
                         work_done_progress_options: Default::default(),
                     },
                 ))),
+                linked_editing_range_provider: Some(LinkedEditingRangeServerCapabilities::Simple(
+                    true,
+                )),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -2465,6 +2468,38 @@ impl LanguageServer for CompactLanguageServer {
         } else {
             Ok(Some(highlights))
         }
+    }
+
+    /// Link a uniquely declared import prefix to its direct prefixed calls.
+    ///
+    /// The parser enforces the LSP requirement that every range contains the
+    /// same text and rejects syntax-only ambiguities. Returning `None` is
+    /// intentional for unsupported or unresolved constructs; it prevents an
+    /// editor from mirroring an unsafe partial rename while the user types.
+    async fn linked_editing_range(
+        &self,
+        params: LinkedEditingRangeParams,
+    ) -> Result<Option<LinkedEditingRanges>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+        let content = match self.documents.get(&uri) {
+            Some(document) => document.content.to_string(),
+            None => return Ok(None),
+        };
+
+        let ranges = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            parser.linked_import_prefix_ranges(&content, position.line, position.character)
+        };
+
+        Ok(ranges.map(|ranges| LinkedEditingRanges {
+            ranges,
+            word_pattern: Some("[A-Za-z_][A-Za-z0-9_]*".to_string()),
+        }))
     }
 
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {

@@ -24,6 +24,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Go to Definition** | Jump to symbol definitions (local and imported) |
 | **Find References** | Find all usages of a symbol (local and cross-file) |
 | **Document Highlights** | Highlight declarations and references under the cursor |
+| **Linked Editing** | Keep import prefix declarations and direct prefixed calls in sync |
 | **Rename** | Rename symbols across the workspace |
 | **Workspace Symbols** | Search declarations across open and indexed Compact files |
 | **Call Hierarchy** | Explore incoming and outgoing local or imported circuit calls |
@@ -83,6 +84,9 @@ Zed currently requires inlay hints to be enabled:
 
 See the [IDE client compatibility matrix](docs/client-compatibility.md) for the
 supported Zed, VS Code, and Neovim versions and repeatable release smoke tests.
+
+See [linked editing behavior and safety guarantees](docs/linked-editing.md) for
+the supported import-prefix workflow in Zed and VS Code.
 
 ## Requirements
 

@@ -32,6 +32,13 @@ CLI and its 0.33 toolchain, or set `compact.compiler.path` to a direct
 | `compact.formatter.path` | Use a direct Compact formatter |
 | `compact.compiler.arguments` | Add project flags such as `--feature-zkir-v3` |
 
+## Linked editing
+
+Set `"editor.linkedEditing": true` to mirror edits between a Compact import
+prefix declaration and the same prefix segment in direct calls. The server
+returns no ranges for ambiguous or incomplete constructs. See the
+[linked-editing contract and test example](../../docs/linked-editing.md).
+
 ## Release verification
 
 The extension verifies the selected archive against the release
