@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use compact_analyzer::{
     CallHierarchyDocument, CircuitDefinition, CompilerCompatibility, CompletionSymbol,
-    DiagnosticEngine, FormatterEngine, ImportInfo, ParserEngine,
+    DiagnosticEngine, ExtractLocalValuePlan, FormatterEngine, ImportInfo, ParserEngine,
 };
 use dashmap::DashMap;
 use lsp_types::*;
@@ -365,12 +365,60 @@ impl CompactLanguageServer {
     /// filter is present, this first implementation accepts only the exact
     /// `quickfix` kind because it does not yet advertise child quick-fix kinds.
     fn quick_fixes_requested(params: &CodeActionParams) -> bool {
+        Self::code_action_kind_requested(params, &CodeActionKind::QUICKFIX)
+    }
+
+    /// Return whether the client requested a code-action kind or one of its parents.
+    ///
+    /// LSP action kinds are hierarchical. A request for `refactor` therefore
+    /// includes `refactor.extract`, while a request for `quickfix` must not
+    /// accidentally enable refactors.
+    fn code_action_kind_requested(params: &CodeActionParams, candidate: &CodeActionKind) -> bool {
         match params.context.only.as_ref() {
             None => true,
-            Some(kinds) => kinds
-                .iter()
-                .any(|kind| kind.as_str() == CodeActionKind::QUICKFIX.as_str()),
+            Some(kinds) => kinds.iter().any(|requested| {
+                requested == candidate
+                    || requested.as_str().is_empty()
+                    || candidate
+                        .as_str()
+                        .strip_prefix(requested.as_str())
+                        .is_some_and(|suffix| suffix.starts_with('.'))
+            }),
         }
+    }
+
+    /// Convert a syntax-checked analyzer plan into a previewable workspace edit.
+    ///
+    /// The analyzer guarantees that the insertion and replacement ranges do not
+    /// overlap. Keeping the action data-only lets Zed, VS Code, and other
+    /// clients preview the complete transformation before applying it.
+    fn extract_local_value_action(uri: &Uri, plan: ExtractLocalValuePlan) -> CodeActionOrCommand {
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![
+                TextEdit {
+                    range: plan.insertion_range,
+                    new_text: plan.declaration,
+                },
+                TextEdit {
+                    range: plan.expression_range,
+                    new_text: plan.name.clone(),
+                },
+            ],
+        );
+
+        CodeAction {
+            title: format!("Extract to local `{}`", plan.name),
+            kind: Some(CodeActionKind::REFACTOR_EXTRACT),
+            edit: Some(WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            }),
+            ..Default::default()
+        }
+        .into()
     }
 
     /// Create a new language server instance.
@@ -1470,7 +1518,10 @@ impl LanguageServer for CompactLanguageServer {
                 }),
                 code_action_provider: Some(CodeActionProviderCapability::Options(
                     CodeActionOptions {
-                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        code_action_kinds: Some(vec![
+                            CodeActionKind::QUICKFIX,
+                            CodeActionKind::REFACTOR_EXTRACT,
+                        ]),
                         resolve_provider: Some(false),
                         work_done_progress_options: Default::default(),
                     },
@@ -2289,24 +2340,43 @@ impl LanguageServer for CompactLanguageServer {
         Ok(Some(CompletionResponse::Array(items)))
     }
 
-    /// Convert eligible request diagnostics into conservative punctuation quick fixes.
+    /// Return diagnostic quick fixes and selection-based semantic refactors.
     ///
-    /// Diagnostics are evaluated independently and unsafe entries are omitted.
-    /// The handler returns an empty response for unsupported action-kind filters
-    /// rather than executing edits or guessing at compiler intent.
+    /// Diagnostics are evaluated independently and unsafe quick fixes are
+    /// omitted. Action-kind filters are hierarchical, so the handler only
+    /// evaluates the kinds requested by the client.
+    ///
+    /// Extract-local actions are offered only when the analyzer proves the
+    /// exact selection safe. Unsupported, incomplete, or effectful selections
+    /// simply omit the action, which is the LSP convention for unavailable
+    /// refactors.
     async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
-        if !Self::quick_fixes_requested(&params) {
-            return Ok(Some(Vec::new()));
+        let mut actions = Vec::new();
+        if Self::quick_fixes_requested(&params) {
+            actions.extend(params.context.diagnostics.iter().filter_map(|diagnostic| {
+                Self::quick_fix_for_missing_token(&params.text_document.uri, diagnostic)
+            }));
         }
 
-        let actions = params
-            .context
-            .diagnostics
-            .iter()
-            .filter_map(|diagnostic| {
-                Self::quick_fix_for_missing_token(&params.text_document.uri, diagnostic)
-            })
-            .collect();
+        if Self::code_action_kind_requested(&params, &CodeActionKind::REFACTOR_EXTRACT) {
+            let uri = params.text_document.uri.to_string();
+            if let Some(content) = self
+                .documents
+                .get(&uri)
+                .map(|document| document.content.to_string())
+            {
+                let plan = {
+                    let mut parser = self.parser_engine.lock().unwrap();
+                    parser.extract_local_value_plan(&content, params.range)
+                };
+                if let Some(plan) = plan {
+                    actions.push(Self::extract_local_value_action(
+                        &params.text_document.uri,
+                        plan,
+                    ));
+                }
+            }
+        }
 
         Ok(Some(actions))
     }
@@ -3726,5 +3796,56 @@ mod code_action_tests {
             &diagnostic("Syntax error: missing ;", "compactc")
         )
         .is_none());
+    }
+
+    #[test]
+    fn code_action_kind_filter_respects_lsp_hierarchy() {
+        let params: CodeActionParams = serde_json::from_value(serde_json::json!({
+            "textDocument": { "uri": "file:///workspace/Main.compact" },
+            "range": {
+                "start": { "line": 0, "character": 0 },
+                "end": { "line": 0, "character": 1 }
+            },
+            "context": {
+                "diagnostics": [],
+                "only": ["refactor"]
+            }
+        }))
+        .unwrap();
+
+        assert!(CompactLanguageServer::code_action_kind_requested(
+            &params,
+            &CodeActionKind::REFACTOR_EXTRACT
+        ));
+        assert!(!CompactLanguageServer::quick_fixes_requested(&params));
+    }
+
+    #[test]
+    fn extract_plan_becomes_a_previewable_workspace_edit() {
+        let uri = Uri::from_str("file:///workspace/Main.compact").unwrap();
+        let plan = ExtractLocalValuePlan {
+            name: "extractedValue".to_string(),
+            insertion_range: Range::new(Position::new(1, 4), Position::new(1, 4)),
+            declaration: "const extractedValue = a + b;\n    ".to_string(),
+            expression_range: Range::new(Position::new(1, 11), Position::new(1, 16)),
+        };
+
+        let action = CompactLanguageServer::extract_local_value_action(&uri, plan);
+        let CodeActionOrCommand::CodeAction(action) = action else {
+            panic!("expected a code action");
+        };
+        assert_eq!(action.title, "Extract to local `extractedValue`");
+        assert_eq!(action.kind, Some(CodeActionKind::REFACTOR_EXTRACT));
+        assert_eq!(
+            action
+                .edit
+                .unwrap()
+                .changes
+                .unwrap()
+                .get(&uri)
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }

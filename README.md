@@ -35,6 +35,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Formatting** | Code formatting via the Compact CLI or `format-compact` |
 | **Folding Ranges** | Code folding for blocks and functions |
 | **Code Actions** | Safe quick fixes for Compact syntax diagnostics |
+| **Semantic Refactors** | Extract reviewed expressions into collision-free local constants |
 | **Cross-file Errors** | Errors propagate to dependent files on save |
 
 ### Cross-Project Support
@@ -87,6 +88,9 @@ supported Zed, VS Code, and Neovim versions and repeatable release smoke tests.
 
 See [linked editing behavior and safety guarantees](docs/linked-editing.md) for
 the supported import-prefix workflow in Zed and VS Code.
+
+See [semantic refactors](docs/refactors.md) for the extract-local safety
+contract, editor workflow, and evaluated follow-up transformations.
 
 ## Requirements
 

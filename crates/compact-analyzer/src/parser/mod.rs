@@ -11,6 +11,7 @@
 //! - Syntax errors
 //! - Semantic tokens
 //! - Find references
+//! - Conservative semantic refactor plans
 
 mod types;
 
@@ -2226,6 +2227,291 @@ impl ParserEngine {
         start <= position && position < end
     }
 
+    /// Plan a conservative “extract local value” refactor for an exact selection.
+    ///
+    /// The selection must match one complete, single-line expression node
+    /// inside a standalone `return` or `const` statement in a circuit. The
+    /// complete statement must contain only syntax classified as effect-free;
+    /// calls, assignments, assertions, disclosures, mapping/folding forms,
+    /// incomplete nodes, and unknown grammar constructs all return `None`.
+    ///
+    /// Requiring the whole statement to be effect-free matters because the new
+    /// `const` declaration evaluates immediately before that statement.
+    /// Moving a subexpression out of a statement that also mutates or observes
+    /// state could otherwise change evaluation order.
+    ///
+    /// The returned identifier is unique among every identifier and declaration
+    /// name in the document. Positions use LSP UTF-16 code units. This method
+    /// never edits source text; clients can preview and apply the returned plan
+    /// as two non-overlapping text edits.
+    pub fn extract_local_value_plan(
+        &mut self,
+        source: &str,
+        selection: Range,
+    ) -> Option<ExtractLocalValuePlan> {
+        if selection.start >= selection.end || selection.start.line != selection.end.line {
+            return None;
+        }
+
+        let start =
+            Self::lsp_position_to_point(source, selection.start.line, selection.start.character)?;
+        let end = Self::lsp_position_to_point(source, selection.end.line, selection.end.character)?;
+        let tree = self.parse(source)?;
+        let root = tree.root_node();
+        let expression = Self::deepest_named_node_with_range(root, start, end)?;
+        if !Self::is_extractable_expression_root(expression.kind())
+            || !Self::has_expression_context(expression)
+            || expression.has_error()
+        {
+            return None;
+        }
+
+        let statement = Self::ancestor_with_kind(expression, "stmt")?;
+        if !Self::is_extract_safe_statement(statement) {
+            return None;
+        }
+        if Self::crosses_deferred_evaluation_boundary(expression, statement) {
+            return None;
+        }
+        Self::ancestor_with_kind(statement, "cdefn")?;
+
+        let line_start = source[..statement.start_byte()]
+            .rfind('\n')
+            .map_or(0, |i| i + 1);
+        let indent = &source[line_start..statement.start_byte()];
+        if !indent.bytes().all(|byte| matches!(byte, b' ' | b'\t')) {
+            return None;
+        }
+
+        let expression_text = expression.utf8_text(source.as_bytes()).ok()?;
+        if expression_text.trim() != expression_text || expression_text.is_empty() {
+            return None;
+        }
+
+        let mut names = HashSet::new();
+        Self::collect_source_names(root, source.as_bytes(), &mut names);
+        let name = (1..=10_000)
+            .map(|index| {
+                if index == 1 {
+                    "extractedValue".to_string()
+                } else {
+                    format!("extractedValue{index}")
+                }
+            })
+            .find(|candidate| !names.contains(candidate))?;
+
+        let insertion = Self::point_to_lsp_position(source.as_bytes(), statement.start_position());
+        Some(ExtractLocalValuePlan {
+            declaration: format!("const {name} = {expression_text};\n{indent}"),
+            insertion_range: Range {
+                start: insertion,
+                end: insertion,
+            },
+            expression_range: self.node_range(expression, source),
+            name,
+        })
+    }
+
+    /// Find the deepest named syntax node whose byte points exactly match a selection.
+    ///
+    /// Tree-sitter frequently gives wrapper nodes the same range as their
+    /// expression child. Preferring the deepest match lets the safety classifier
+    /// reason about the concrete expression while still requiring an exact
+    /// editor selection.
+    fn deepest_named_node_with_range<'tree>(
+        node: Node<'tree>,
+        start: tree_sitter::Point,
+        end: tree_sitter::Point,
+    ) -> Option<Node<'tree>> {
+        if node.start_position() > start || node.end_position() < end {
+            return None;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            if let Some(found) = Self::deepest_named_node_with_range(child, start, end) {
+                return Some(found);
+            }
+        }
+
+        (node.is_named() && node.start_position() == start && node.end_position() == end)
+            .then_some(node)
+    }
+
+    /// Return the closest ancestor, including `node`, with the requested kind.
+    fn ancestor_with_kind<'tree>(node: Node<'tree>, kind: &str) -> Option<Node<'tree>> {
+        let mut current = Some(node);
+        while let Some(candidate) = current {
+            if candidate.kind() == kind {
+                return Some(candidate);
+            }
+            current = candidate.parent();
+        }
+        None
+    }
+
+    /// Check that a selected node belongs to an expression rather than a type or pattern.
+    fn has_expression_context(node: Node) -> bool {
+        let mut current = Some(node);
+        while let Some(candidate) = current {
+            match candidate.kind() {
+                "expr" | "expr_seq" | "term" => return true,
+                "stmt" => return false,
+                _ => current = candidate.parent(),
+            }
+        }
+        false
+    }
+
+    /// Reject extraction from inside a conditional or short-circuit expression.
+    ///
+    /// A nested branch or boolean operand is not necessarily evaluated in the
+    /// original program. Hoisting it into a preceding `const` would make its
+    /// evaluation unconditional even when every operation is otherwise pure.
+    /// Extracting the complete lazy expression remains safe because none of its
+    /// lazy boundaries appear between the selected node and its statement.
+    fn crosses_deferred_evaluation_boundary(expression: Node, statement: Node) -> bool {
+        let mut current = expression.parent();
+        while let Some(candidate) = current {
+            if candidate == statement {
+                return false;
+            }
+            if matches!(
+                candidate.kind(),
+                "conditional_expr" | "and_expr" | "or_expr"
+            ) {
+                return true;
+            }
+            current = candidate.parent();
+        }
+        true
+    }
+
+    /// Return whether a node kind can be the root of an extracted expression.
+    ///
+    /// This allowlist is deliberately explicit. New grammar constructs remain
+    /// unavailable until their evaluation behavior has been reviewed.
+    fn is_extractable_expression_root(kind: &str) -> bool {
+        matches!(
+            kind,
+            "expr_seq"
+                | "conditional_expr"
+                | "expr"
+                | "or_expr"
+                | "and_expr"
+                | "comparison_expr"
+                | "rel_comparison_expr"
+                | "bin_sum_expr"
+                | "bin_mul_expr"
+                | "not_expr"
+                | "index_access_expr"
+                | "member_access_expr"
+                | "term"
+                | "struct_term"
+                | "array_literal"
+                | "bytes_literal"
+                | "expr_seq_term"
+                | "lit"
+                | "id"
+                | "nat"
+                | "str"
+        )
+    }
+
+    /// Check the complete containing statement against the effect-free allowlist.
+    ///
+    /// Only `return` and local `const` statements are supported. Traversal uses
+    /// named nodes, so punctuation and operator tokens do not need to be
+    /// enumerated; named comparison and boolean operators are listed explicitly.
+    fn is_extract_safe_statement(statement: Node) -> bool {
+        let supported_statement = statement
+            .named_child(0)
+            .is_some_and(|child| matches!(child.kind(), "return_stmt" | "const_stmt"));
+        supported_statement && Self::is_extract_safe_subtree(statement)
+    }
+
+    /// Recursively reject effectful, incomplete, or not-yet-reviewed syntax.
+    fn is_extract_safe_subtree(node: Node) -> bool {
+        if node.has_error()
+            || !matches!(
+                node.kind(),
+                "stmt"
+                    | "return_stmt"
+                    | "const_stmt"
+                    | "cbinding"
+                    | "pattern"
+                    | "expr_seq"
+                    | "conditional_expr"
+                    | "expr"
+                    | "or_expr"
+                    | "and_expr"
+                    | "comparison_expr"
+                    | "rel_comparison_expr"
+                    | "bin_sum_expr"
+                    | "bin_mul_expr"
+                    | "not_expr"
+                    | "index_access_expr"
+                    | "member_access_expr"
+                    | "term"
+                    | "struct_term"
+                    | "struct_arg"
+                    | "struct_named_filed_initializer"
+                    | "struct_update_field"
+                    | "array_literal"
+                    | "bytes_literal"
+                    | "expr_seq_term"
+                    | "lit"
+                    | "id"
+                    | "nat"
+                    | "str"
+                    | "equals"
+                    | "not_equals"
+                    | "greater_than_or_equal"
+                    | "less_than_or_equal"
+                    | "greater_than"
+                    | "less_than"
+                    | "not"
+                    | "and"
+                    | "or"
+            )
+        {
+            return false;
+        }
+
+        let mut cursor = node.walk();
+        let all_children_are_safe = node
+            .named_children(&mut cursor)
+            .all(Self::is_extract_safe_subtree);
+        all_children_are_safe
+    }
+
+    /// Collect every source-level name that could collide with a generated local.
+    ///
+    /// This intentionally includes uses as well as declarations. Generating a
+    /// suffix instead of shadowing any existing spelling keeps the edit valid
+    /// without requiring scope resolution.
+    fn collect_source_names(node: Node, source: &[u8], names: &mut HashSet<String>) {
+        if matches!(
+            node.kind(),
+            "id" | "function_name"
+                | "module_name"
+                | "struct_name"
+                | "enum_name"
+                | "contract_name"
+                | "type_name"
+                | "tvar_name"
+        ) {
+            if let Ok(name) = node.utf8_text(source) {
+                names.insert(name.to_string());
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            Self::collect_source_names(child, source, names);
+        }
+    }
+
     /// Get member access context at a cursor position.
     ///
     /// If the cursor is on `increment` in `round.increment(1)`, returns
@@ -3622,6 +3908,173 @@ circuit main(): Field { return Utils_(; }";
                 .linked_import_prefix_ranges(incomplete, 0, 25)
                 .is_none(),
             "incomplete calls must not create linked ranges"
+        );
+    }
+
+    #[test]
+    fn extract_local_value_plans_two_non_overlapping_edits() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+circuit calculate(a: Field, b: Field): Field {
+    return a + b * 3;
+}";
+        let plan = parser
+            .extract_local_value_plan(
+                source,
+                Range::new(Position::new(1, 11), Position::new(1, 20)),
+            )
+            .expect("pure arithmetic selection should be extractable");
+
+        assert_eq!(plan.name, "extractedValue");
+        assert_eq!(
+            plan.insertion_range,
+            Range::new(Position::new(1, 4), Position::new(1, 4))
+        );
+        assert_eq!(
+            plan.expression_range,
+            Range::new(Position::new(1, 11), Position::new(1, 20))
+        );
+        assert_eq!(plan.declaration, "const extractedValue = a + b * 3;\n    ");
+
+        let mut transformed = source.to_string();
+        let second_line = source.find('\n').unwrap() + 1;
+        transformed.replace_range(second_line + 11..second_line + 20, &plan.name);
+        transformed.insert_str(second_line + 4, &plan.declaration);
+        assert_eq!(
+            transformed,
+            "\
+circuit calculate(a: Field, b: Field): Field {
+    const extractedValue = a + b * 3;
+    return extractedValue;
+}"
+        );
+        assert!(
+            parser.get_syntax_errors(&transformed).is_empty(),
+            "the generated Compact source must remain syntactically valid"
+        );
+    }
+
+    #[test]
+    fn extract_local_value_uses_a_collision_free_name_and_utf16_positions() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+circuit calculate(extractedValue: Field, a: Field): Field {
+    return \"😀\" == \"x\";
+}";
+        let plan = parser
+            .extract_local_value_plan(
+                source,
+                Range::new(Position::new(1, 11), Position::new(1, 22)),
+            )
+            .expect("UTF-16 selection should include the emoji as two code units");
+
+        assert_eq!(plan.name, "extractedValue2");
+        assert_eq!(plan.expression_range.end.character, 22);
+        assert_eq!(
+            plan.declaration,
+            "const extractedValue2 = \"😀\" == \"x\";\n    "
+        );
+    }
+
+    #[test]
+    fn extract_local_value_rejects_effectful_or_inexact_selections() {
+        let mut parser = ParserEngine::new();
+        let call_source = "\
+circuit calculate(a: Field): Field {
+    return a + compute(a);
+}";
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    call_source,
+                    Range::new(Position::new(1, 11), Position::new(1, 12)),
+                )
+                .is_none(),
+            "a call elsewhere in the statement makes reordering unsafe"
+        );
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    call_source,
+                    Range::new(Position::new(1, 15), Position::new(1, 25)),
+                )
+                .is_none(),
+            "calls are never extractable"
+        );
+
+        let pure_source = "\
+circuit calculate(a: Field): Field {
+    return a + 1;
+}";
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    pure_source,
+                    Range::new(Position::new(1, 10), Position::new(1, 16)),
+                )
+                .is_none(),
+            "whitespace around an expression is not an exact AST selection"
+        );
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    pure_source,
+                    Range::new(Position::new(1, 11), Position::new(2, 0)),
+                )
+                .is_none(),
+            "multi-line selections are intentionally unsupported"
+        );
+
+        let lazy_source = "\
+circuit calculate(condition: Boolean, a: Field): Field {
+    return condition ? a + 1 : 0;
+}";
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    lazy_source,
+                    Range::new(Position::new(1, 23), Position::new(1, 28)),
+                )
+                .is_none(),
+            "extracting a conditional branch would make its evaluation unconditional"
+        );
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    lazy_source,
+                    Range::new(Position::new(1, 11), Position::new(1, 32)),
+                )
+                .is_some(),
+            "extracting the complete conditional expression preserves lazy evaluation"
+        );
+    }
+
+    #[test]
+    fn extract_local_value_rejects_incomplete_syntax_and_non_expressions() {
+        let mut parser = ParserEngine::new();
+        let incomplete = "\
+circuit calculate(a: Field): Field {
+    return a + ;
+}";
+        assert!(parser
+            .extract_local_value_plan(
+                incomplete,
+                Range::new(Position::new(1, 11), Position::new(1, 12)),
+            )
+            .is_none());
+
+        let declaration = "\
+circuit calculate(a: Field): Field {
+    return a;
+}";
+        assert!(
+            parser
+                .extract_local_value_plan(
+                    declaration,
+                    Range::new(Position::new(0, 8), Position::new(0, 17)),
+                )
+                .is_none(),
+            "declaration names are not expressions"
         );
     }
 
