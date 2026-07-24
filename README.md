@@ -46,6 +46,9 @@ registers a `**/*.compact` file watcher when the client supports it. Creating,
 changing, or deleting an imported file updates completion and navigation
 without restarting the language server.
 
+Open documents use incremental UTF-16 synchronization, so editors send only
+the changed ranges instead of retransmitting the full file after every edit.
+
 ## Requirements
 
 - The `compact` CLI with a Compact 0.33 toolchain (recommended)

@@ -282,6 +282,10 @@ async fn run_multi_root_file_lifecycle() {
         initialize["capabilities"]["codeActionProvider"]["codeActionKinds"],
         json!(["quickfix"])
     );
+    assert_eq!(
+        initialize["capabilities"]["textDocumentSync"]["change"], 2,
+        "the server should negotiate incremental document synchronization"
+    );
 
     lsp.notify("initialized", json!({})).await;
     lsp.wait_until_ready().await;
@@ -365,6 +369,29 @@ async fn run_multi_root_file_lifecycle() {
         code_actions[0]["edit"]["changes"][&main_uri][0]["newText"],
         ";"
     );
+    let user_last_line_length = user_source.lines().last().unwrap().encode_utf16().count();
+    lsp.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": {
+                "uri": user_uri,
+                "version": 2
+            },
+            "contentChanges": [{
+                "range": {
+                    "start": { "line": 1, "character": user_last_line_length },
+                    "end": { "line": 1, "character": user_last_line_length }
+                },
+                "rangeLength": 0,
+                "text": "\ncircuit added(): Field { return 3; }"
+            }]
+        }),
+    )
+    .await;
+    assert!(lsp
+        .wait_for_completion(&user_uri, "added", true)
+        .await
+        .contains("added"));
     let references = lsp
         .request(
             "textDocument/references",
