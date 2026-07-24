@@ -19,10 +19,16 @@ public beta. The server crates and VS Code extension share one version.
    jq -r '.version' editors/vscode/package.json
    ```
 
-6. Create a Verified signed tag named `v<version>` and push it.
+6. Run the `Release` workflow manually from `main`. Manual runs execute the
+   full verification, cross-platform build, packaging, artifact download, and
+   checksum assembly without creating attestations or publishing a GitHub
+   release. Download the `compact-lsp-release-dry-run-*` artifact and inspect
+   its archives, VSIX, and `SHA256SUMS`.
+7. Create a Verified signed tag named `v<version>` and push it.
 
 The tag starts `.github/workflows/release.yml`. The workflow rejects a tag that
-does not match both manifests.
+does not match both manifests. Only a tag-triggered run creates attestations
+and publishes a GitHub release.
 
 ## Verify the published release
 
