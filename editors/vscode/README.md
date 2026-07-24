@@ -39,6 +39,13 @@ prefix declaration and the same prefix segment in direct calls. The server
 returns no ranges for ambiguous or incomplete constructs. See the
 [linked-editing contract and test example](../../docs/linked-editing.md).
 
+## Semantic refactors
+
+Select an exact, effect-free expression inside a Compact `return` or local
+`const`, then use the lightbulb or **Quick Fix...** menu and choose
+**Extract to local `extractedValue`**. Unsafe or incomplete selections do not
+offer an edit. See the [refactor safety contract](../../docs/refactors.md).
+
 ## Release verification
 
 The extension verifies the selected archive against the release

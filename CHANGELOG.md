@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Semantic selection ranges for identifiers, expressions, blocks, and
   declarations.
 - Conservative linked editing for import prefixes and direct prefixed calls.
+- A conservative extract-local-value refactor delivered as a previewable
+  workspace edit.
 
 ### Changed
 

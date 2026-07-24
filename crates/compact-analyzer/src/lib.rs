@@ -19,8 +19,8 @@ pub use diagnostics::{CompilerCompatibility, CompilerInfo, DiagnosticEngine};
 pub use formatter::FormatterEngine;
 pub use parser::{
     CallArgument, CallHierarchyDocument, CallSite, CircuitCall, CircuitDefinition,
-    CompletionSymbol, CompletionSymbolKind, DefinitionLocation, HoverInfo, ImportInfo,
-    MemberAccessContext, ParameterInfo, ParserEngine, ReferenceLocation, SemanticToken,
+    CompletionSymbol, CompletionSymbolKind, DefinitionLocation, ExtractLocalValuePlan, HoverInfo,
+    ImportInfo, MemberAccessContext, ParameterInfo, ParserEngine, ReferenceLocation, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SignatureInfo, SourceIndex, SymbolLocation,
     SyntaxError,
 };

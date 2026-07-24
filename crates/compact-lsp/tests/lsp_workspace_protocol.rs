@@ -554,6 +554,7 @@ async fn run_multi_root_file_lifecycle() {
     let highlight_path = root_a.join("Highlight.compact");
     let hints_path = root_a.join("Hints.compact");
     let linked_path = root_a.join("Linked.compact");
+    let refactor_path = root_a.join("Refactor.compact");
     let main_source = "import \"./Utility\" prefix Utils_;\nimport \"./New\";\ncircuit main(): Field { return Utils_hierarchy_target() + Utils_hierarchy_target(); }";
     let user_source = "import \"./Other\";\ncircuit user(): Field { return other(); }";
     let other_source = "circuit other(): Field { return 2; }";
@@ -585,6 +586,13 @@ import \"./Utility\" prefix Utils_;
 circuit linked(): Field {
     return Utils_utility() + Utils_utility();
 }";
+    let refactor_source = "\
+circuit calculate(a: Field, b: Field): Field {
+    return a + b * 3;
+}
+circuit unsafe(a: Field): Field {
+    return a + utility();
+}";
     std::fs::write(
         root_a.join("Utility.compact"),
         "circuit hierarchy_target(): Field { return hierarchy_target(); }",
@@ -606,6 +614,7 @@ circuit linked(): Field {
     .unwrap();
     std::fs::write(&hints_path, hints_source).unwrap();
     std::fs::write(&linked_path, linked_source).unwrap();
+    std::fs::write(&refactor_path, refactor_source).unwrap();
 
     let root_a_uri = file_uri(&root_a);
     let root_b_uri = file_uri(&root_b);
@@ -616,6 +625,7 @@ circuit linked(): Field {
     let highlight_uri = file_uri(&highlight_path);
     let hints_uri = file_uri(&hints_path);
     let linked_uri = file_uri(&linked_path);
+    let refactor_uri = file_uri(&refactor_path);
     let mut lsp = LspHarness::start(&compiler).await;
 
     let initialize = lsp
@@ -643,7 +653,7 @@ circuit linked(): Field {
     );
     assert_eq!(
         initialize["capabilities"]["codeActionProvider"]["codeActionKinds"],
-        json!(["quickfix"])
+        json!(["quickfix", "refactor.extract"])
     );
     assert_eq!(
         initialize["capabilities"]["textDocumentSync"]["change"], 2,
@@ -748,6 +758,18 @@ circuit linked(): Field {
                 "languageId": "compact",
                 "version": 1,
                 "text": linked_source
+            }
+        }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": refactor_uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": refactor_source
             }
         }),
     )
@@ -1081,6 +1103,71 @@ circuit linked(): Field {
         Value::Null,
         "call suffixes must not activate linked editing"
     );
+    let extract_actions = lsp
+        .request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": refactor_uri },
+                "range": {
+                    "start": { "line": 1, "character": 11 },
+                    "end": { "line": 1, "character": 20 }
+                },
+                "context": {
+                    "diagnostics": [],
+                    "only": ["refactor"],
+                    "triggerKind": 1
+                }
+            }),
+        )
+        .await;
+    let extract_actions = extract_actions
+        .as_array()
+        .expect("extract code action array");
+    assert_eq!(extract_actions.len(), 1);
+    assert_eq!(
+        extract_actions[0]["title"],
+        "Extract to local `extractedValue`"
+    );
+    assert_eq!(extract_actions[0]["kind"], "refactor.extract");
+    assert_eq!(
+        extract_actions[0]["edit"]["changes"][&refactor_uri],
+        json!([
+            {
+                "range": {
+                    "start": { "line": 1, "character": 4 },
+                    "end": { "line": 1, "character": 4 }
+                },
+                "newText": "const extractedValue = a + b * 3;\n    "
+            },
+            {
+                "range": {
+                    "start": { "line": 1, "character": 11 },
+                    "end": { "line": 1, "character": 20 }
+                },
+                "newText": "extractedValue"
+            }
+        ])
+    );
+    assert_eq!(
+        lsp.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": refactor_uri },
+                "range": {
+                    "start": { "line": 4, "character": 11 },
+                    "end": { "line": 4, "character": 12 }
+                },
+                "context": {
+                    "diagnostics": [],
+                    "only": ["refactor.extract"],
+                    "triggerKind": 1
+                }
+            }),
+        )
+        .await,
+        json!([]),
+        "effectful statements must not offer extract-local refactors"
+    );
     let code_actions = lsp
         .request(
             "textDocument/codeAction",
@@ -1238,6 +1325,11 @@ circuit linked(): Field {
     lsp.notify(
         "textDocument/didClose",
         json!({ "textDocument": { "uri": linked_uri } }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": refactor_uri } }),
     )
     .await;
     lsp.shutdown().await;

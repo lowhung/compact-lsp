@@ -225,3 +225,21 @@ pub struct ReferenceLocation {
     /// True if this is the definition site, false if it's a usage.
     pub is_definition: bool,
 }
+
+/// A syntax-checked plan for extracting an expression into a local constant.
+///
+/// The analyzer does not mutate source text. Callers convert this plan into
+/// two non-overlapping edits: insert [`Self::declaration`] at
+/// [`Self::insertion_range`], then replace [`Self::expression_range`] with
+/// [`Self::name`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractLocalValuePlan {
+    /// Collision-free identifier generated for the new local constant.
+    pub name: String,
+    /// Zero-width range immediately before the containing statement.
+    pub insertion_range: Range,
+    /// Complete declaration text, including the newline and statement indent.
+    pub declaration: String,
+    /// Exact selected expression range to replace with [`Self::name`].
+    pub expression_range: Range,
+}
