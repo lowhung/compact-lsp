@@ -1,12 +1,15 @@
 # compact-lsp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![CI](https://github.com/1NickPappas/compact-lsp/actions/workflows/ci.yml/badge.svg)](https://github.com/1NickPappas/compact-lsp/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
+[![CI](https://github.com/lowhung/compact-lsp/actions/workflows/ci.yml/badge.svg)](https://github.com/lowhung/compact-lsp/actions/workflows/ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
 
 This project extends the Midnight Network with additional developer tooling.
 
-> ⚠️ **Note:** This is an experimental project developed in my personal free time for educational purposes — primarily to learn how Language Server Protocol implementations work. While functional, it is not officially supported. Feedback and contributions are welcome!
+> **Beta:** This is a community-maintained project, not an officially supported
+> Midnight Network component. Please report compatibility problems with the
+> Compact compiler and language versions included in the bug report.
 
 Language Server Protocol implementation for the [Compact](https://docs.midnight.network/develop/reference/compact/lang-ref) smart contract language (Midnight network).
 
@@ -23,7 +26,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Rename** | Rename symbols across the workspace |
 | **Signature Help** | Parameter hints while typing function calls |
 | **Document Symbols** | Outline view (circuits, structs, enums, modules) |
-| **Formatting** | Code formatting via `format-compact` |
+| **Formatting** | Code formatting via the Compact CLI or `format-compact` |
 | **Folding Ranges** | Code folding for blocks and functions |
 | **Cross-file Errors** | Errors propagate to dependent files on save |
 
@@ -50,17 +53,48 @@ without restarting the language server.
 
 ## Requirements
 
-- Rust toolchain (for building)
 - The `compact` CLI with a Compact 0.33 toolchain (recommended)
 - A direct `compactc` and `format-compact` installation is also supported
 
-## Building
+## Installation
+
+### VS Code
+
+Download `compact-lsp-vscode-<version>.vsix` from the matching
+[GitHub release](https://github.com/lowhung/compact-lsp/releases), then install
+it:
 
 ```bash
-cargo build --release
+code --install-extension compact-lsp-vscode-v0.2.0.vsix
+```
+
+The extension uses `compact-lsp` from `PATH` when available. Otherwise it
+downloads the checksummed server archive for the current platform. See the
+[VS Code setup and settings](editors/vscode/README.md).
+
+### Server binary
+
+Release archives are available for macOS (Apple Silicon and Intel), Linux
+x86-64, and Windows x86-64. Verify an archive against `SHA256SUMS`, extract it,
+and place `compact-lsp` (or `compact-lsp.exe`) in `PATH`.
+
+Release artifacts also carry GitHub build-provenance attestations:
+
+```bash
+gh attestation verify compact-lsp-macos-arm64.tar.gz --repo lowhung/compact-lsp
+```
+
+### Build from source
+
+A Rust toolchain is only required when building locally:
+
+```bash
+cargo build --workspace --release --locked
 ```
 
 Binary: `target/release/compact-lsp`
+
+Confirm which server an editor will launch with `compact-lsp --version`.
 
 ## Compact Toolchain
 
@@ -104,7 +138,7 @@ Create `~/.config/nvim/lua/lsp/compact.lua`:
 
 ```lua
 return {
-    cmd = { vim.fn.expand("~/path/to/compact-lsp/target/release/compact-lsp") },
+    cmd = { "compact-lsp" },
     filetypes = { "compact" },
     root_markers = { ".git", "compact.toml", "package.json" },
 }
@@ -157,4 +191,7 @@ vim.api.nvim_create_autocmd("LspAttach", {
 
 ## License
 
-MIT
+Most of the project is licensed under the [MIT License](LICENSE). The Compact
+analyzer and selected server metadata components retain their
+[Apache-2.0](LICENSE-APACHE) license and Midnight Foundation attribution; see
+[NOTICE](NOTICE).

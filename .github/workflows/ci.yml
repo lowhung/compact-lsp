@@ -27,6 +27,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+      - name: Verify vendored grammar
+        run: |
+          echo "fa4e01563617f1e1b5872fb81b7a835c03c553c3e5f7d4392be35b7f4d62c55b  crates/compact-analyzer/vendor/compact-tree-sitter/parser.c" | sha256sum --check
+          echo "180b893c8734778fd32f372dfbc27bd6ad1cd2221f26150b31256ff6716320d2  crates/compact-analyzer/vendor/compact-tree-sitter/tree_sitter/parser.h" | sha256sum --check
+
       - name: Clippy
         run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
@@ -35,6 +40,11 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features --locked
+
+      - name: Verify source packages
+        run: |
+          cargo package -p compact-analyzer --locked
+          cargo package --workspace --locked --no-verify
 
   build:
     name: Build (${{ matrix.os }})
@@ -64,3 +74,38 @@ jobs:
 
       - name: Build
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+
+  vscode:
+    name: VS Code extension
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type-check
+        run: npm run lint
+
+      - name: Run tests
+        run: npm test
+
+      - name: Package VSIX
+        run: npm run package -- --out compact-lsp-vscode.vsix
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: compact-lsp-vscode
+          path: editors/vscode/compact-lsp-vscode.vsix
+          if-no-files-found: error

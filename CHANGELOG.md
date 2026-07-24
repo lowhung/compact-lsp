@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - 2025-01-XX
+### Added
+
+- Compact CLI discovery with a selectable Compact 0.33 toolchain.
+- Multi-root workspace indexing and live `.compact` file lifecycle updates.
+- Checksummed, provenance-attested server archives and a VS Code extension.
+- JSON-RPC regression coverage for workspace initialization and file events.
+
+### Changed
+
+- Pinned the maintained Compact tree-sitter grammar and added 0.33 fixtures.
+- Made document synchronization, UTF-16 positions, and file URI handling
+  protocol-correct.
+
+### Fixed
+
+- Compiler process cleanup, unique live-diagnostic sources, and paths containing
+  spaces or non-ASCII characters.
+
+## [0.1.0] - 2025-12-16
 
 ### Added
 - Initial release

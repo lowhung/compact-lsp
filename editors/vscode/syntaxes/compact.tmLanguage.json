@@ -1,0 +1,117 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Compact",
+  "scopeName": "source.compact",
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#declarations"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#numbers"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.compact",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.compact",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.compact",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.compact",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(circuit|witness)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.compact"
+            },
+            "2": {
+              "name": "entity.name.function.compact"
+            }
+          }
+        },
+        {
+          "match": "\\b(struct|enum|module|contract)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": {
+              "name": "storage.type.compact"
+            },
+            "2": {
+              "name": "entity.name.type.compact"
+            }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.compact",
+          "match": "\\b(if|else|for|while|of|return|assert)\\b"
+        },
+        {
+          "name": "keyword.other.compact",
+          "match": "\\b(pragma|import|include|export|prefix|ledger|constructor|let|const|default|map|fold|disclose|pad|as|public|private|pure|sealed)\\b"
+        },
+        {
+          "name": "constant.language.boolean.compact",
+          "match": "\\b(true|false)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.compact",
+          "match": "\\b(Boolean|Field|Uint|Bytes|Opaque|Vector|Counter|Map|Set|Cell|List|MerkleTree|HistoricMerkleTree|Address|Void|Maybe|Either|CurvePoint|ContractAddress|CoinInfo|MerkleTreeDigest|MerkleTreePathEntry|MerkleTreePath|QualifiedCoinInfo|ZswapCoinPublicKey|SendResult)\\b"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.compact",
+          "match": "\\b0[xX][0-9a-fA-F]+\\b"
+        },
+        {
+          "name": "constant.numeric.decimal.compact",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    }
+  }
+}

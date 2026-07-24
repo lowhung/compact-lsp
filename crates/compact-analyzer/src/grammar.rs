@@ -1,0 +1,9 @@
+//! Rust binding for the vendored Compact tree-sitter parser.
+
+use tree_sitter_language::LanguageFn;
+
+extern "C" {
+    fn tree_sitter_compact() -> *const ();
+}
+
+pub const LANGUAGE: LanguageFn = unsafe { LanguageFn::from_raw(tree_sitter_compact) };

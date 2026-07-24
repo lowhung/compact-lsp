@@ -1,0 +1,9 @@
+node_modules/**
+src/**
+tsconfig.json
+package-lock.json
+*.vsix
+out/**/*.map
+out/test/**
+out/release.js
+out/serverInstaller.js

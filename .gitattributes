@@ -25,3 +25,5 @@ Cargo.lock text eol=lf
 
 # Ignore generated files
 /target export-ignore
+crates/compact-analyzer/vendor/compact-tree-sitter/parser.c linguist-generated=true
+crates/compact-analyzer/vendor/compact-tree-sitter/tree_sitter/parser.h linguist-vendored=true

@@ -1,0 +1,11 @@
+compact-lsp
+
+Copyright (c) 2025 1NickPappas
+
+The compact-analyzer crate and files in compact-lsp carrying Apache-2.0 SPDX
+headers are Copyright (C) 2025 Midnight Foundation and licensed under
+Apache-2.0.
+
+The vendored Compact tree-sitter parser is derived from
+https://github.com/midnames/compact-tree-sitter at revision
+9ea58fc47c88af914599c368cce031ad6343965b and is licensed under Apache-2.0.

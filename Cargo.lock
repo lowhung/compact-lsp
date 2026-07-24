@@ -53,9 +53,10 @@ checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
 
 [[package]]
 name = "compact-analyzer"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
+ "cc",
  "ls-types",
  "regex",
  "semver",
@@ -66,13 +67,13 @@ dependencies = [
  "tower-lsp-server",
  "tracing",
  "tree-sitter",
- "tree-sitter-compact",
+ "tree-sitter-language",
  "url",
 ]
 
 [[package]]
 name = "compact-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "compact-analyzer",
@@ -1056,15 +1057,6 @@ dependencies = [
  "regex-syntax",
  "serde_json",
  "streaming-iterator",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-compact"
-version = "0.1.0"
-source = "git+https://github.com/midnames/compact-tree-sitter?rev=9ea58fc47c88af914599c368cce031ad6343965b#9ea58fc47c88af914599c368cce031ad6343965b"
-dependencies = [
- "cc",
  "tree-sitter-language",
 ]
 

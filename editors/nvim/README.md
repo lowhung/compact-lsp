@@ -8,7 +8,7 @@ Create `~/.config/nvim/lua/core/lsp/configs/compact_lsp.lua`:
 
 ```lua
 return {
-    cmd = { vim.fn.expand("~/Documents/midnight/lsp/compact-lsp/target/release/compact-lsp") },
+    cmd = { "compact-lsp" },
     filetypes = { "compact" },
     root_markers = { ".git", "compact.toml", "package.json" },
     settings = {
@@ -46,26 +46,33 @@ vim.api.nvim_create_autocmd("FileType", {
 
 ## Usage
 
-1. Open any `.compact` file
-2. Check connection: `:LspInfo`
-3. View logs: `:LspLog`
+1. Put the release binary in `PATH` and confirm it with
+   `compact-lsp --version`.
+2. Open any `.compact` file.
+3. Check the connection with `:LspInfo`.
+4. View logs with `:LspLog`.
+
+The Compact compiler is separate. Install the `compact` CLI and toolchain 0.33,
+or set `COMPACT_COMPILER` to a direct compiler binary before starting Neovim.
 
 ## Features
 
-- **Diagnostics** - Compiler errors and warnings on save
-- **Completion** - Keywords, types, snippets, and cross-project symbols
-- **Hover** - Documentation for keywords, types, and symbols
-- **Go to Definition** - Navigate to definitions (same file and imports)
-- **Signature Help** - Parameter hints while typing function calls
-- **Document Symbols** - Outline view (circuits, structs, enums, etc.)
-- **Folding** - Code folding for blocks and functions
-- **Formatting** - Format with `format-compact`
+- **Diagnostics** - Compiler errors and warnings on save.
+- **Completion** - Keywords, types, snippets, and cross-project symbols.
+- **Hover** - Documentation for keywords, types, and symbols.
+- **Go to Definition** - Navigate to definitions in the workspace.
+- **References and Rename** - Inspect and update resolved workspace symbols.
+- **Signature Help** - Show parameter hints while typing function calls.
+- **Document Symbols** - Populate the outline with Compact declarations.
+- **Folding** - Fold blocks and functions.
+- **Formatting** - Format through the Compact CLI or `format-compact`.
 
 ## Keymaps
 
 Standard LSP keymaps apply:
-- `gd` - Go to definition
-- `K` - Hover documentation
-- `[d` / `]d` - Navigate diagnostics
-- `<leader>ld` - Show diagnostic float
-- `<C-Space>` - Trigger completion (if configured)
+
+- `gd` - Go to definition.
+- `K` - Hover documentation.
+- `[d` / `]d` - Navigate diagnostics.
+- `<leader>ld` - Show diagnostic float.
+- `<C-Space>` - Trigger completion, if configured.

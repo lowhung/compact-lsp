@@ -49,4 +49,4 @@ tempfile.workspace = true
 toml.workspace = true
 
 # Our diagnostic engine crate
-compact-analyzer = { path = "../compact-analyzer" }
+compact-analyzer = { version = "0.2.0", path = "../compact-analyzer" }
