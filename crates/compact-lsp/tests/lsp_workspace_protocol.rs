@@ -189,6 +189,33 @@ impl LspHarness {
         panic!("completion item {expected:?} did not reach expected state {should_exist}");
     }
 
+    async fn workspace_symbols(&mut self, query: &str) -> Vec<Value> {
+        self.request("workspace/symbol", json!({ "query": query }))
+            .await
+            .as_array()
+            .cloned()
+            .expect("workspace symbol array")
+    }
+
+    async fn wait_for_workspace_symbol(
+        &mut self,
+        query: &str,
+        expected: &str,
+        should_exist: bool,
+    ) -> Vec<Value> {
+        for _ in 0..20 {
+            let symbols = self.workspace_symbols(query).await;
+            let exists = symbols
+                .iter()
+                .any(|symbol| symbol["name"].as_str() == Some(expected));
+            if exists == should_exist {
+                return symbols;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("workspace symbol {expected:?} did not reach expected state {should_exist}");
+    }
+
     async fn shutdown(mut self) {
         assert_eq!(self.request("shutdown", Value::Null).await, Value::Null);
         self.notify("exit", Value::Null).await;
@@ -246,6 +273,11 @@ async fn run_multi_root_file_lifecycle() {
     std::fs::write(&main_path, main_source).unwrap();
     std::fs::write(&other_path, other_source).unwrap();
     std::fs::write(&user_path, user_source).unwrap();
+    std::fs::write(
+        root_a.join("Unicode.compact"),
+        "/*😀*/ circuit unicode_name(): Field { return 5; }",
+    )
+    .unwrap();
 
     let root_a_uri = file_uri(&root_a);
     let root_b_uri = file_uri(&root_b);
@@ -285,6 +317,10 @@ async fn run_multi_root_file_lifecycle() {
     assert_eq!(
         initialize["capabilities"]["textDocumentSync"]["change"], 2,
         "the server should negotiate incremental document synchronization"
+    );
+    assert_eq!(
+        initialize["capabilities"]["workspaceSymbolProvider"]["resolveProvider"],
+        false
     );
 
     lsp.notify("initialized", json!({})).await;
@@ -338,6 +374,23 @@ async fn run_multi_root_file_lifecycle() {
 
     assert!(lsp.completion_labels(&user_uri).await.contains("other"));
     assert!(!lsp.completion_labels(&main_uri).await.contains("fresh"));
+    let initial_symbols = lsp.workspace_symbols("").await;
+    let initial_names: Vec<_> = initial_symbols
+        .iter()
+        .filter_map(|symbol| symbol["name"].as_str())
+        .collect();
+    assert!(
+        initial_names.windows(2).all(|names| names[0] <= names[1]),
+        "empty workspace queries should be deterministically sorted"
+    );
+    let unicode_symbol = initial_symbols
+        .iter()
+        .find(|symbol| symbol["name"] == "unicode_name")
+        .expect("indexed Unicode-adjacent symbol");
+    assert_eq!(
+        unicode_symbol["location"]["range"]["start"]["character"], 7,
+        "workspace symbol locations should use UTF-16 columns"
+    );
     let code_actions = lsp
         .request(
             "textDocument/codeAction",
@@ -392,6 +445,11 @@ async fn run_multi_root_file_lifecycle() {
         .wait_for_completion(&user_uri, "added", true)
         .await
         .contains("added"));
+    assert!(lsp
+        .wait_for_workspace_symbol("ADD", "added", true)
+        .await
+        .iter()
+        .any(|symbol| symbol["containerName"] == "User.compact"));
     let references = lsp
         .request(
             "textDocument/references",
@@ -418,6 +476,14 @@ async fn run_multi_root_file_lifecycle() {
         .wait_for_completion(&main_uri, "fresh", true)
         .await
         .contains("fresh"));
+    let canonical_new_uri = file_uri(&new_path.canonicalize().unwrap());
+    let fresh_symbols = lsp.wait_for_workspace_symbol("fresh", "fresh", true).await;
+    assert!(
+        fresh_symbols
+            .iter()
+            .any(|symbol| symbol["location"]["uri"] == canonical_new_uri),
+        "unexpected workspace symbols: {fresh_symbols:#?}; expected URI {canonical_new_uri}"
+    );
 
     std::fs::write(&new_path, "circuit newer(): Field { return 4; }").unwrap();
     lsp.notify(
@@ -427,6 +493,16 @@ async fn run_multi_root_file_lifecycle() {
     .await;
     let changed = lsp.wait_for_completion(&main_uri, "newer", true).await;
     assert!(!changed.contains("fresh"));
+    assert!(!lsp
+        .wait_for_workspace_symbol("fresh", "fresh", false)
+        .await
+        .iter()
+        .any(|symbol| symbol["name"] == "fresh"));
+    assert!(lsp
+        .wait_for_workspace_symbol("newer", "newer", true)
+        .await
+        .iter()
+        .any(|symbol| symbol["name"] == "newer"));
 
     std::fs::remove_file(&new_path).unwrap();
     lsp.notify(
@@ -438,6 +514,11 @@ async fn run_multi_root_file_lifecycle() {
         .wait_for_completion(&main_uri, "newer", false)
         .await
         .contains("newer"));
+    assert!(!lsp
+        .wait_for_workspace_symbol("newer", "newer", false)
+        .await
+        .iter()
+        .any(|symbol| symbol["name"] == "newer"));
 
     lsp.notify(
         "textDocument/didClose",

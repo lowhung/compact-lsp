@@ -40,6 +40,20 @@ struct IndexedWorkspaceFile {
     imports: Vec<ImportInfo>,
 }
 
+/// A sortable workspace-symbol result plus the stable keys used to rank and deduplicate it.
+struct WorkspaceSymbolCandidate {
+    /// Query match quality: exact, prefix, substring, or an unfiltered empty-query match.
+    match_rank: u8,
+    /// Lowercase symbol name used for case-insensitive matching and ordering.
+    normalized_name: String,
+    /// Stable secondary ordering for Compact declaration kinds.
+    kind_rank: u8,
+    /// Canonical document URI used to keep multi-root results deterministic.
+    uri: String,
+    /// LSP payload returned to the client after sorting and deduplication.
+    information: SymbolInformation,
+}
+
 /// The Compact Language Server.
 ///
 /// This struct holds all the state needed by the server:
@@ -541,6 +555,153 @@ impl CompactLanguageServer {
         }
     }
 
+    /// Build a deterministic `workspace/symbol` response from a symbol-cache snapshot.
+    ///
+    /// Taking owned entries ensures no `DashMap` guard is held while the results are
+    /// filtered and sorted. Identical declarations are deduplicated by kind, URI,
+    /// name, and UTF-16 range, while distinct declarations with the same name remain.
+    fn workspace_symbol_results(
+        entries: Vec<(String, Vec<CompletionSymbol>)>,
+        query: &str,
+    ) -> Vec<SymbolInformation> {
+        let normalized_query = query.trim().to_lowercase();
+        let mut candidates = Vec::new();
+
+        for (uri_string, symbols) in entries {
+            let Ok(uri) = uri_string.parse::<Uri>() else {
+                continue;
+            };
+            let container_name = imports::file_uri_to_path(&uri_string).and_then(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+            });
+
+            for symbol in symbols {
+                let Some(location) = symbol.location else {
+                    continue;
+                };
+                let normalized_name = symbol.name.to_lowercase();
+                let Some(match_rank) =
+                    Self::workspace_symbol_match_rank(&normalized_name, &normalized_query)
+                else {
+                    continue;
+                };
+                let (kind, kind_rank) = Self::workspace_symbol_kind(symbol.kind);
+
+                #[allow(deprecated)]
+                let information = SymbolInformation {
+                    name: symbol.name,
+                    kind,
+                    tags: None,
+                    deprecated: None,
+                    location: Location {
+                        uri: uri.clone(),
+                        range: Range {
+                            start: Position {
+                                line: location.start_line,
+                                character: location.start_char,
+                            },
+                            end: Position {
+                                line: location.end_line,
+                                character: location.end_char,
+                            },
+                        },
+                    },
+                    container_name: container_name.clone(),
+                };
+
+                candidates.push(WorkspaceSymbolCandidate {
+                    match_rank,
+                    normalized_name,
+                    kind_rank,
+                    uri: uri_string.clone(),
+                    information,
+                });
+            }
+        }
+
+        candidates.sort_by(|left, right| {
+            left.match_rank
+                .cmp(&right.match_rank)
+                .then(left.normalized_name.cmp(&right.normalized_name))
+                .then(left.information.name.cmp(&right.information.name))
+                .then(left.kind_rank.cmp(&right.kind_rank))
+                .then(left.uri.cmp(&right.uri))
+                .then(
+                    left.information
+                        .location
+                        .range
+                        .start
+                        .line
+                        .cmp(&right.information.location.range.start.line),
+                )
+                .then(
+                    left.information
+                        .location
+                        .range
+                        .start
+                        .character
+                        .cmp(&right.information.location.range.start.character),
+                )
+                .then(
+                    left.information
+                        .location
+                        .range
+                        .end
+                        .line
+                        .cmp(&right.information.location.range.end.line),
+                )
+                .then(
+                    left.information
+                        .location
+                        .range
+                        .end
+                        .character
+                        .cmp(&right.information.location.range.end.character),
+                )
+        });
+        candidates.dedup_by(|left, right| {
+            left.kind_rank == right.kind_rank
+                && left.uri == right.uri
+                && left.information.name == right.information.name
+                && left.information.location.range == right.information.location.range
+        });
+
+        candidates
+            .into_iter()
+            .map(|candidate| candidate.information)
+            .collect()
+    }
+
+    /// Rank a normalized symbol name against a normalized query.
+    ///
+    /// Lower values sort first. Empty queries intentionally include every cached
+    /// declaration, while non-matches are excluded.
+    fn workspace_symbol_match_rank(name: &str, query: &str) -> Option<u8> {
+        if query.is_empty() {
+            Some(3)
+        } else if name == query {
+            Some(0)
+        } else if name.starts_with(query) {
+            Some(1)
+        } else if name.contains(query) {
+            Some(2)
+        } else {
+            None
+        }
+    }
+
+    /// Convert an analyzer declaration kind to its LSP kind and stable sort rank.
+    fn workspace_symbol_kind(kind: compact_analyzer::CompletionSymbolKind) -> (SymbolKind, u8) {
+        match kind {
+            compact_analyzer::CompletionSymbolKind::Function => (SymbolKind::FUNCTION, 0),
+            compact_analyzer::CompletionSymbolKind::Struct => (SymbolKind::STRUCT, 1),
+            compact_analyzer::CompletionSymbolKind::Enum => (SymbolKind::ENUM, 2),
+            compact_analyzer::CompletionSymbolKind::Variable => (SymbolKind::VARIABLE, 3),
+            compact_analyzer::CompletionSymbolKind::Module => (SymbolKind::MODULE, 4),
+        }
+    }
+
     /// Update reverse dependencies for a file based on its imports.
     fn update_reverse_dependencies(&self, uri: &str, content: &str) {
         let uri = Self::cache_uri(uri);
@@ -829,6 +990,10 @@ impl LanguageServer for CompactLanguageServer {
                 )),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                workspace_symbol_provider: Some(OneOf::Right(WorkspaceSymbolOptions {
+                    resolve_provider: Some(false),
+                    work_done_progress_options: Default::default(),
+                })),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
@@ -1702,6 +1867,21 @@ impl LanguageServer for CompactLanguageServer {
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
+    /// Search the current open-document and indexed-workspace symbol cache.
+    async fn symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> Result<Option<WorkspaceSymbolResponse>> {
+        let entries = self
+            .symbol_cache
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect();
+        let symbols = Self::workspace_symbol_results(entries, &params.query);
+
+        Ok(Some(WorkspaceSymbolResponse::Flat(symbols)))
+    }
+
     async fn folding_range(&self, params: FoldingRangeParams) -> Result<Option<Vec<FoldingRange>>> {
         let uri = params.text_document.uri.to_string();
 
@@ -2393,6 +2573,25 @@ impl LanguageServer for CompactLanguageServer {
 mod workspace_tests {
     use super::*;
 
+    fn cached_symbol(
+        name: &str,
+        kind: compact_analyzer::CompletionSymbolKind,
+        character: u32,
+    ) -> CompletionSymbol {
+        CompletionSymbol {
+            name: name.to_string(),
+            kind,
+            detail: None,
+            location: Some(compact_analyzer::SymbolLocation {
+                start_line: 1,
+                start_char: character,
+                end_line: 1,
+                end_char: character + name.encode_utf16().count() as u32,
+            }),
+            documentation: None,
+        }
+    }
+
     #[test]
     fn indexes_multiple_and_nested_workspace_roots_without_duplicates() {
         let first = tempfile::tempdir().unwrap();
@@ -2464,6 +2663,45 @@ mod workspace_tests {
         );
 
         assert_eq!(roots, vec![second.to_string(), third.to_string()]);
+    }
+
+    #[test]
+    fn workspace_symbols_are_ranked_sorted_and_deduplicated() {
+        let alpha = cached_symbol("alpha", compact_analyzer::CompletionSymbolKind::Function, 4);
+        let entries = vec![
+            (
+                "file:///workspace/B.compact".to_string(),
+                vec![cached_symbol(
+                    "contains_alpha",
+                    compact_analyzer::CompletionSymbolKind::Variable,
+                    8,
+                )],
+            ),
+            (
+                "file:///workspace/A.compact".to_string(),
+                vec![
+                    cached_symbol(
+                        "alphabet",
+                        compact_analyzer::CompletionSymbolKind::Struct,
+                        2,
+                    ),
+                    alpha.clone(),
+                    alpha,
+                ],
+            ),
+        ];
+
+        let symbols = CompactLanguageServer::workspace_symbol_results(entries, "ALPHA");
+        assert_eq!(
+            symbols
+                .iter()
+                .map(|symbol| symbol.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["alpha", "alphabet", "contains_alpha"]
+        );
+        assert_eq!(symbols[0].location.range.start.character, 4);
+        assert_eq!(symbols[0].container_name.as_deref(), Some("A.compact"));
+        assert_eq!(symbols[0].kind, SymbolKind::FUNCTION);
     }
 }
 
