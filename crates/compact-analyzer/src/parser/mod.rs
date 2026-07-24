@@ -29,7 +29,7 @@ impl ParserEngine {
     pub fn new() -> Self {
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_compact::LANGUAGE.into())
+            .set_language(&crate::grammar::LANGUAGE.into())
             .expect("Failed to load Compact grammar");
         Self { parser }
     }

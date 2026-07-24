@@ -1,5 +1,8 @@
 # Build artifacts
 /target/
+/editors/vscode/node_modules/
+/editors/vscode/out/
+/editors/vscode/*.vsix
 
 # Editor files
 .idea/

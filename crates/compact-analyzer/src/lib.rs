@@ -11,6 +11,7 @@
 
 pub mod diagnostics;
 pub mod formatter;
+mod grammar;
 pub mod parser;
 pub mod toolchain;
 

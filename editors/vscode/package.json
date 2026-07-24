@@ -1,0 +1,153 @@
+{
+  "name": "compact-lsp",
+  "displayName": "Compact Language Server",
+  "description": "Compact 0.33 language support powered by compact-lsp.",
+  "version": "0.2.0",
+  "publisher": "lowhung",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lowhung/compact-lsp.git",
+    "directory": "editors/vscode"
+  },
+  "bugs": {
+    "url": "https://github.com/lowhung/compact-lsp/issues"
+  },
+  "homepage": "https://github.com/lowhung/compact-lsp",
+  "engines": {
+    "vscode": "^1.91.0"
+  },
+  "categories": [
+    "Programming Languages",
+    "Linters",
+    "Formatters"
+  ],
+  "keywords": [
+    "compact",
+    "midnight",
+    "language-server",
+    "lsp"
+  ],
+  "activationEvents": [
+    "onLanguage:compact",
+    "onCommand:compact.installServer",
+    "onCommand:compact.restartServer",
+    "onCommand:compact.showOutput"
+  ],
+  "main": "./out/extension.js",
+  "extensionKind": [
+    "workspace"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "compact",
+        "aliases": [
+          "Compact",
+          "compact"
+        ],
+        "extensions": [
+          ".compact"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "compact",
+        "scopeName": "source.compact",
+        "path": "./syntaxes/compact.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "compact.installServer",
+        "title": "Compact: Install or Update Language Server"
+      },
+      {
+        "command": "compact.restartServer",
+        "title": "Compact: Restart Language Server"
+      },
+      {
+        "command": "compact.showOutput",
+        "title": "Compact: Show Language Server Output"
+      }
+    ],
+    "configuration": {
+      "title": "Compact",
+      "properties": {
+        "compact.server.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "description": "Absolute path to compact-lsp. When empty, the extension searches PATH and then downloads a release binary."
+        },
+        "compact.server.autoDownload": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine-overridable",
+          "description": "Download a checksummed compact-lsp release when no local binary is configured or found."
+        },
+        "compact.server.repository": {
+          "type": "string",
+          "default": "lowhung/compact-lsp",
+          "scope": "machine-overridable",
+          "description": "GitHub owner/repository used for automatic server downloads."
+        },
+        "compact.server.version": {
+          "type": "string",
+          "default": "latest",
+          "scope": "machine-overridable",
+          "description": "Release tag to install, such as v0.2.0, or latest."
+        },
+        "compact.toolchain.version": {
+          "type": "string",
+          "default": "0.33.0",
+          "scope": "resource",
+          "description": "Compact CLI toolchain version selected for compiler diagnostics."
+        },
+        "compact.compiler.path": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional direct path to compactc or compactc.bin."
+        },
+        "compact.formatter.path": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Optional direct path to format-compact."
+        },
+        "compact.compiler.arguments": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "description": "Additional compiler arguments, for example --feature-zkir-v3."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p tsconfig.json && npm run bundle",
+    "bundle": "esbuild src/extension.ts --bundle --platform=node --target=node20 --format=cjs --external:vscode --outfile=out/extension.js --sourcemap",
+    "lint": "tsc --noEmit -p tsconfig.json",
+    "test": "npm run compile && node --test out/test/*.test.js",
+    "package": "vsce package"
+  },
+  "dependencies": {
+    "extract-zip": "2.0.1",
+    "tar": "7.5.21",
+    "vscode-languageclient": "10.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "20.17.0",
+    "@types/vscode": "1.91.0",
+    "@vscode/vsce": "3.9.2",
+    "esbuild": "0.28.1",
+    "typescript": "7.0.2"
+  }
+}

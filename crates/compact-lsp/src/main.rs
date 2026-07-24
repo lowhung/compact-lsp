@@ -14,11 +14,55 @@
 //! which writes to stderr.
 
 use compact_lsp::server;
+use std::ffi::OsString;
 use tower_lsp::{LspService, Server};
 use tracing_subscriber::EnvFilter;
 
+#[derive(Debug, PartialEq, Eq)]
+enum Command {
+    Help,
+    Serve,
+    Version,
+}
+
+fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
+    let arguments: Vec<_> = arguments.into_iter().collect();
+    match arguments.as_slice() {
+        [] => Ok(Command::Serve),
+        [argument] if argument == "--help" || argument == "-h" => Ok(Command::Help),
+        [argument] if argument == "--version" || argument == "-V" => Ok(Command::Version),
+        _ => Err(format!(
+            "unexpected arguments: {}",
+            arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join(" ")
+        )),
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    match parse_command(std::env::args_os().skip(1)) {
+        Ok(Command::Help) => {
+            println!(
+                "compact-lsp {}\n\nUsage: compact-lsp [--help | --version]\n\nRuns the Compact language server over standard input and output.",
+                env!("CARGO_PKG_VERSION")
+            );
+            return;
+        }
+        Ok(Command::Version) => {
+            println!("compact-lsp {}", env!("CARGO_PKG_VERSION"));
+            return;
+        }
+        Ok(Command::Serve) => {}
+        Err(error) => {
+            eprintln!("compact-lsp: {error}\nTry 'compact-lsp --help' for usage.");
+            std::process::exit(2);
+        }
+    }
+
     // Initialize logging to stderr
     // Set RUST_LOG=debug to see debug messages
     // Example: RUST_LOG=compact_lsp=debug cargo run
@@ -43,4 +87,22 @@ async fn main() {
     Server::new(stdin, stdout, socket).serve(service).await;
 
     tracing::info!("compact-lsp server stopped");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_server_and_metadata_commands() {
+        assert_eq!(parse_command([]), Ok(Command::Serve));
+        assert_eq!(parse_command([OsString::from("--help")]), Ok(Command::Help));
+        assert_eq!(parse_command([OsString::from("-V")]), Ok(Command::Version));
+    }
+
+    #[test]
+    fn rejects_unknown_or_multiple_arguments() {
+        assert!(parse_command([OsString::from("--tcp")]).is_err());
+        assert!(parse_command([OsString::from("--help"), OsString::from("extra")]).is_err());
+    }
 }

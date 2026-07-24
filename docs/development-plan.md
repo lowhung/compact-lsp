@@ -24,12 +24,12 @@ claim full compatibility.
 
 - Pin a maintained Compact tree-sitter grammar revision.
 - Add Compact 0.33 parser fixtures and a compiler-valid compatibility corpus.
-- Publish the maintained grammar to crates.io or vendor it as a workspace crate;
-  a Git-only grammar dependency prevents `cargo package` from succeeding.
+- Vendor the generated parser from a pinned maintained grammar revision so
+  builds and Cargo source packages do not depend on Git.
 - Make `cargo fmt --all -- --check`, Clippy with warnings denied, tests, locked
   release builds, and package checks pass in CI.
-- Resolve repository metadata and mixed MIT/Apache-2.0 source licensing before
-  publishing crates or release archives.
+- Preserve the mixed MIT/Apache-2.0 source licensing in package metadata and
+  include both license texts and attribution in release archives.
 
 Exit criteria:
 
