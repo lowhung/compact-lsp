@@ -1,0 +1,39 @@
+pragma language_version >= 0.25;
+
+import CompactStandardLibrary;
+
+module Numbers {
+  export circuit identity(value: Field): Field {
+    return value;
+  }
+}
+
+import { identity as keep } from Numbers prefix Number$;
+
+contract Calculator {
+  circuit square(value: Field): Field;
+  pure circuit version(): Uint<16>;
+}
+
+ledger calculator: Calculator;
+
+constructor(target: Calculator) {
+  calculator = disclose(target);
+}
+
+export circuit calculate(value: Field): Field {
+  const local = Number$keep(value);
+  return calculator.square(disclose(local));
+}
+
+export circuit verifySignature(
+  message: Bytes<32>,
+  signature: Secp256k1EcdsaSignature,
+  publicKey: Secp256k1Point
+): Boolean {
+  return secp256k1EcdsaVerify(
+    keccak256<Bytes<32>>(message),
+    signature,
+    publicKey
+  );
+}

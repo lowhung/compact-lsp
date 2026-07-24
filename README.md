@@ -67,7 +67,7 @@ The LSP auto-detects `compactc.bin`:
 ## Related Projects
 
 - [compact.vim](https://github.com/1NickPappas/compact.vim) - Vim/Neovim syntax highlighting
-- [compact-tree-sitter](https://github.com/midnightntwrk/compact-tree-sitter) - Tree-sitter grammar
+- [compact-tree-sitter](https://github.com/midnames/compact-tree-sitter) - Maintained Tree-sitter grammar fork
 
 ## Neovim Setup
 
