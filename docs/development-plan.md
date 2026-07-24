@@ -84,6 +84,8 @@ Exit criteria:
 ### 4. Workspace semantics
 
 - Index every workspace folder without blocking the async runtime.
+- Guard startup and interactive request latency with a generated-workspace
+  protocol benchmark.
 - Follow create, rename, delete, and content changes through file watchers.
 - Bound symlink traversal and cache growth.
 - Model Compact 0.33 modules, selective imports, prefixes, contract types, and
@@ -94,6 +96,8 @@ Exit criteria:
 
 - Multi-root workspaces and file lifecycle changes update navigation without a
   restart.
+- Workspace indexing remains responsive within the documented CI regression
+  thresholds.
 - Import, definition, reference, completion, and rename tests use real
   multi-file Compact 0.33 projects.
 

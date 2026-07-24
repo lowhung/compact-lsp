@@ -124,6 +124,9 @@ Binary: `target/release/compact-lsp`
 
 Confirm which server an editor will launch with `compact-lsp --version`.
 
+For generated-workspace measurements and the CI responsiveness guard, see
+[Performance validation](docs/performance.md).
+
 ## Compact Toolchain
 
 The LSP prefers the current `compact` CLI and falls back to direct compiler

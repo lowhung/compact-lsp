@@ -60,6 +60,9 @@ cargo fmt --all -- --check
 
 # Run linter
 cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+# Check public documentation and links
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 ```
 
 ## Making Changes
@@ -68,6 +71,9 @@ cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
 
 - Follow Rust idioms and best practices.
 - Keep functions focused and small.
+- Document public functions and types. Document internal helpers when their
+  invariants, failure behavior, or performance role are not obvious from the
+  implementation.
 - Add tests for new functionality.
 - Update documentation for user-visible behavior and configuration.
 - Add Rustdoc to public APIs and non-obvious private helpers. Explain the
