@@ -804,7 +804,7 @@ impl LanguageServer for CompactLanguageServer {
                 text_document_sync: Some(TextDocumentSyncCapability::Options(
                     TextDocumentSyncOptions {
                         open_close: Some(true),
-                        change: Some(TextDocumentSyncKind::FULL),
+                        change: Some(TextDocumentSyncKind::INCREMENTAL),
                         save: Some(TextDocumentSyncSaveOptions::SaveOptions(SaveOptions {
                             include_text: Some(false),
                         })),
@@ -1018,25 +1018,16 @@ impl LanguageServer for CompactLanguageServer {
         let uri_string = uri.to_string();
         let version = params.text_document.version;
 
-        if params
-            .content_changes
-            .iter()
-            .any(|change| change.range.is_some())
-        {
-            tracing::warn!(
-                "Ignoring incremental change for {} because the server negotiated full sync",
-                uri_string
-            );
-            return;
-        }
-
-        let Some(change) = params.content_changes.last() else {
-            tracing::warn!("Ignoring empty document change for {}", uri_string);
-            return;
-        };
-
         let updated = match self.documents.get_mut(&uri_string) {
-            Some(mut document) => document.replace_if_newer(version, &change.text),
+            Some(mut document) => {
+                match document.apply_changes_if_newer(version, &params.content_changes) {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        tracing::warn!("Ignoring invalid change for {}: {}", uri_string, error);
+                        return;
+                    }
+                }
+            }
             None => {
                 tracing::warn!("Ignoring change for unopened document {}", uri_string);
                 return;
