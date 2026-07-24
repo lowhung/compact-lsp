@@ -46,6 +46,28 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets --all-features --locked
 
+      - name: Install pinned Neovim
+        env:
+          NVIM_ARCHIVE_SHA256: b2f91117be5b5ea39edd7297156dc2a4a8df4add6c95a90809a8df19e7ab6f52
+          NVIM_VERSION: 0.11.5
+        run: |
+          curl --fail --location --silent --show-error \
+            --output "$RUNNER_TEMP/nvim-linux-x86_64.tar.gz" \
+            "https://github.com/neovim/neovim/releases/download/v${NVIM_VERSION}/nvim-linux-x86_64.tar.gz"
+          echo "${NVIM_ARCHIVE_SHA256}  $RUNNER_TEMP/nvim-linux-x86_64.tar.gz" | sha256sum --check
+          tar --extract --gzip \
+            --file "$RUNNER_TEMP/nvim-linux-x86_64.tar.gz" \
+            --directory "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/nvim-linux-x86_64/bin" >> "$GITHUB_PATH"
+
+      - name: Run Neovim client smoke
+        env:
+          COMPACT_LSP_SMOKE_ROOT: ${{ github.workspace }}/test-fixtures/client-smoke
+          COMPACT_LSP_SMOKE_SERVER: ${{ github.workspace }}/target/release/compact-lsp
+          NVIM_LOG_FILE: ${{ runner.temp }}/nvim.log
+          XDG_STATE_HOME: ${{ runner.temp }}/nvim-state
+        run: nvim --headless -i NONE -u editors/nvim/smoke.lua
+
       - name: Verify source packages
         run: |
           cargo package -p compact-analyzer --locked

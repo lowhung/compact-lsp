@@ -1,0 +1,5 @@
+pragma language_version >= 0.25;
+
+export circuit broken(value: Field): Field {
+  return value
+}

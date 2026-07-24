@@ -79,6 +79,9 @@ Zed currently requires inlay hints to be enabled:
 }
 ```
 
+See the [IDE client compatibility matrix](docs/client-compatibility.md) for the
+supported Zed, VS Code, and Neovim versions and repeatable release smoke tests.
+
 ## Requirements
 
 - The `compact` CLI with a Compact 0.33 toolchain (recommended)
