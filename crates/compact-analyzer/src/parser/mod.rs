@@ -169,6 +169,72 @@ impl ParserEngine {
         None
     }
 
+    /// Build inner-to-outer semantic selection chains for multiple LSP positions.
+    ///
+    /// Each valid chain follows named syntax-tree ancestors and removes wrapper
+    /// nodes that have the same range as their child. Error and missing nodes are
+    /// skipped, but valid enclosing syntax is retained for incomplete documents.
+    /// Invalid UTF-16 positions receive a zero-width fallback so the result count
+    /// always matches the request count, as required by the protocol.
+    pub fn selection_range_chains(
+        &mut self,
+        source: &str,
+        positions: &[Position],
+    ) -> Vec<Vec<Range>> {
+        let Some(tree) = self.parse(source) else {
+            return positions
+                .iter()
+                .copied()
+                .map(Self::fallback_selection_range)
+                .collect();
+        };
+        let root = tree.root_node();
+        let source_bytes = source.as_bytes();
+
+        positions
+            .iter()
+            .copied()
+            .map(|position| {
+                let Some(point) =
+                    Self::lsp_position_to_point(source, position.line, position.character)
+                else {
+                    return Self::fallback_selection_range(position);
+                };
+                let Some(mut node) = root.named_descendant_for_point_range(point, point) else {
+                    return Self::fallback_selection_range(position);
+                };
+
+                let mut ranges = Vec::new();
+                loop {
+                    if !node.is_error() && !node.is_missing() {
+                        let range = self.node_range(node, source_bytes);
+                        if range.start != range.end && ranges.last() != Some(&range) {
+                            ranges.push(range);
+                        }
+                    }
+                    let Some(parent) = node.parent() else {
+                        break;
+                    };
+                    node = parent;
+                }
+
+                if ranges.is_empty() {
+                    Self::fallback_selection_range(position)
+                } else {
+                    ranges
+                }
+            })
+            .collect()
+    }
+
+    /// Preserve one output entry for an invalid or otherwise unselectable position.
+    fn fallback_selection_range(position: Position) -> Vec<Range> {
+        vec![Range {
+            start: position,
+            end: position,
+        }]
+    }
+
     /// Recursively extract symbols from a node.
     fn extract_symbols(&self, node: Node, source: &[u8]) -> Vec<DocumentSymbol> {
         let mut symbols = Vec::new();
@@ -2131,6 +2197,102 @@ circuit run(): Field {
     }
 
     #[test]
+    fn selection_ranges_expand_through_expression_block_and_declaration() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+/*😀*/ circuit compute(value: Field): Field {
+    const doubled = value + value;
+    return doubled;
+}";
+
+        let chains = parser.selection_range_chains(
+            source,
+            &[
+                Position {
+                    line: 0,
+                    character: 16,
+                },
+                Position {
+                    line: 1,
+                    character: 22,
+                },
+            ],
+        );
+
+        assert_eq!(chains.len(), 2);
+        assert_eq!(
+            chains[0][0],
+            Range {
+                start: Position {
+                    line: 0,
+                    character: 15
+                },
+                end: Position {
+                    line: 0,
+                    character: 22
+                }
+            },
+            "the declaration name range should account for the astral character"
+        );
+        assert_eq!(
+            chains[1][0],
+            Range {
+                start: Position {
+                    line: 1,
+                    character: 20
+                },
+                end: Position {
+                    line: 1,
+                    character: 25
+                }
+            }
+        );
+        for chain in &chains {
+            assert!(
+                chain.windows(2).all(|ranges| {
+                    let starts_before = ranges[1].start.line < ranges[0].start.line
+                        || (ranges[1].start.line == ranges[0].start.line
+                            && ranges[1].start.character <= ranges[0].start.character);
+                    let ends_after = ranges[1].end.line > ranges[0].end.line
+                        || (ranges[1].end.line == ranges[0].end.line
+                            && ranges[1].end.character >= ranges[0].end.character);
+                    starts_before && ends_after
+                }),
+                "every parent should contain its child: {chain:#?}"
+            );
+            assert_eq!(
+                chain.last().unwrap(),
+                &Range {
+                    start: Position {
+                        line: 0,
+                        character: 0
+                    },
+                    end: Position {
+                        line: 3,
+                        character: 1
+                    }
+                },
+                "the document is the outermost selectable syntax node"
+            );
+        }
+        assert!(
+            chains[1].iter().any(|range| {
+                range.start
+                    == Position {
+                        line: 1,
+                        character: 20,
+                    }
+                    && range.end
+                        == Position {
+                            line: 1,
+                            character: 33,
+                        }
+            }),
+            "the expression should appear between identifier and statement ranges"
+        );
+    }
+
+    #[test]
     fn call_hierarchy_collects_direct_nested_and_prefixed_calls() {
         let mut parser = ParserEngine::new();
         let source = "\
@@ -2163,6 +2325,49 @@ circuit caller(value: Field): Field {
                 character: 18
             },
             "call ranges must use UTF-16 columns rather than UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn selection_ranges_preserve_multiple_invalid_and_incomplete_positions() {
+        let mut parser = ParserEngine::new();
+        let source = "/*😀*/ circuit incomplete(value: Field): Field {\n    return value +\n";
+        let positions = [
+            Position {
+                line: 1,
+                character: 11,
+            },
+            Position {
+                line: 0,
+                character: 3,
+            },
+            Position {
+                line: 99,
+                character: 0,
+            },
+        ];
+
+        let chains = parser.selection_range_chains(source, &positions);
+
+        assert_eq!(chains.len(), positions.len());
+        assert!(
+            chains[0].len() >= 2,
+            "valid incomplete syntax should expand"
+        );
+        assert_eq!(
+            chains[1],
+            vec![Range {
+                start: positions[1],
+                end: positions[1]
+            }],
+            "a UTF-16 position inside a surrogate pair should fail closed"
+        );
+        assert_eq!(
+            chains[2],
+            vec![Range {
+                start: positions[2],
+                end: positions[2]
+            }]
         );
     }
 

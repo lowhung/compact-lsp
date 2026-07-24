@@ -274,6 +274,21 @@ impl CompactLanguageServer {
         left.uri == right.uri && left.selection_range == right.selection_range
     }
 
+    /// Convert an inner-to-outer analyzer chain to the recursive LSP shape.
+    ///
+    /// Building from the outside inward guarantees that every `parent` contains
+    /// the range that precedes it in the analyzer output.
+    fn selection_range_chain(ranges: &[Range]) -> SelectionRange {
+        let mut parent = None;
+        for range in ranges.iter().rev() {
+            parent = Some(Box::new(SelectionRange {
+                range: *range,
+                parent,
+            }));
+        }
+        parent.map(|range| *range).unwrap_or_default()
+    }
+
     /// Build a preferred insertion quick fix for one trusted missing-token diagnostic.
     ///
     /// Only parser diagnostics with the exact `compact-syntax` source and message
@@ -1462,6 +1477,7 @@ impl LanguageServer for CompactLanguageServer {
                 )),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                selection_range_provider: Some(SelectionRangeProviderCapability::Simple(true)),
                 workspace_symbol_provider: Some(OneOf::Right(WorkspaceSymbolOptions {
                     resolve_provider: Some(false),
                     work_done_progress_options: Default::default(),
@@ -2345,6 +2361,29 @@ impl LanguageServer for CompactLanguageServer {
         };
 
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
+    }
+
+    /// Expand every requested position through named Compact syntax ancestors.
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> Result<Option<Vec<SelectionRange>>> {
+        let uri = params.text_document.uri.to_string();
+        let content = match self.documents.get(&uri) {
+            Some(document) => document.content.to_string(),
+            None => return Ok(None),
+        };
+        let chains = {
+            let mut parser = self.parser_engine.lock().unwrap();
+            parser.selection_range_chains(&content, &params.positions)
+        };
+
+        Ok(Some(
+            chains
+                .iter()
+                .map(|ranges| Self::selection_range_chain(ranges))
+                .collect(),
+        ))
     }
 
     /// Search the current open-document and indexed-workspace symbol cache.

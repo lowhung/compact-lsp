@@ -30,6 +30,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Signature Help** | Parameter hints while typing function calls |
 | **Inlay Hints** | Conservative parameter names for resolved circuit and ledger-method calls |
 | **Document Symbols** | Outline view (circuits, structs, enums, modules) |
+| **Selection Ranges** | Expand selections through syntax-tree boundaries |
 | **Formatting** | Code formatting via the Compact CLI or `format-compact` |
 | **Folding Ranges** | Code folding for blocks and functions |
 | **Code Actions** | Safe quick fixes for Compact syntax diagnostics |

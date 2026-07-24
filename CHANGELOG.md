@@ -15,6 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - JSON-RPC regression coverage for workspace initialization and file events.
 - Deterministic incoming and outgoing call hierarchy for local and prefixed
   imported circuits.
+- Semantic selection ranges for identifiers, expressions, blocks, and
+  declarations.
 
 ### Changed
 
