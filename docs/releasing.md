@@ -61,6 +61,8 @@ After the workflow completes:
    workspace.
 5. Exercise initialization, completion, navigation, compiler diagnostics,
    formatting, restart, and clean shutdown before marking the release ready.
+6. Publish the verified VSIX to the Visual Studio Marketplace and Open VSX by
+   following [Editor marketplace publishing](editor-marketplaces.md).
 
 ## Cargo publication
 
