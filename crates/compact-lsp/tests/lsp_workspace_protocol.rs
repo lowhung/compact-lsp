@@ -654,6 +654,7 @@ circuit forward(left: Field): Field {
         false
     );
     assert_eq!(initialize["capabilities"]["callHierarchyProvider"], true);
+    assert_eq!(initialize["capabilities"]["selectionRangeProvider"], true);
 
     lsp.notify("initialized", json!({})).await;
     lsp.wait_until_ready().await;
@@ -965,6 +966,55 @@ circuit forward(left: Field): Field {
         .len(),
         2,
         "the server should only return hints inside the requested range"
+    );
+    let selection_ranges = lsp
+        .request(
+            "textDocument/selectionRange",
+            json!({
+                "textDocument": { "uri": highlight_uri },
+                "positions": [
+                    { "line": 0, "character": 15 },
+                    { "line": 1, "character": 35 },
+                    { "line": 99, "character": 0 }
+                ]
+            }),
+        )
+        .await;
+    let selection_ranges = selection_ranges
+        .as_array()
+        .expect("one selection chain per position");
+    assert_eq!(selection_ranges.len(), 3);
+    assert_eq!(
+        selection_ranges[0]["range"],
+        json!({
+            "start": { "line": 0, "character": 15 },
+            "end": { "line": 0, "character": 21 }
+        }),
+        "the UTF-16 declaration-name range should be innermost"
+    );
+    assert_eq!(
+        selection_ranges[1]["range"],
+        json!({
+            "start": { "line": 1, "character": 33 },
+            "end": { "line": 1, "character": 39 }
+        }),
+        "a call should begin with its identifier range"
+    );
+    assert!(
+        selection_ranges[1]["parent"]["parent"].is_object(),
+        "the call should expand through expression and declaration parents"
+    );
+    assert_eq!(
+        selection_ranges[2]["range"],
+        json!({
+            "start": { "line": 99, "character": 0 },
+            "end": { "line": 99, "character": 0 }
+        }),
+        "invalid positions should fail closed without changing response cardinality"
+    );
+    assert!(
+        selection_ranges[2].get("parent").is_none(),
+        "an invalid position should not invent parent syntax"
     );
     let code_actions = lsp
         .request(
