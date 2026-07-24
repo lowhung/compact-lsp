@@ -24,6 +24,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Go to Definition** | Jump to symbol definitions (local and imported) |
 | **Find References** | Find all usages of a symbol (local and cross-file) |
 | **Rename** | Rename symbols across the workspace |
+| **Workspace Symbols** | Search declarations across open and indexed Compact files |
 | **Signature Help** | Parameter hints while typing function calls |
 | **Document Symbols** | Outline view (circuits, structs, enums, modules) |
 | **Formatting** | Code formatting via the Compact CLI or `format-compact` |
