@@ -12,11 +12,13 @@
 pub mod diagnostics;
 pub mod formatter;
 pub mod parser;
+pub mod toolchain;
 
-pub use diagnostics::DiagnosticEngine;
+pub use diagnostics::{CompilerCompatibility, CompilerInfo, DiagnosticEngine};
 pub use formatter::FormatterEngine;
 pub use parser::{
     CompletionSymbol, CompletionSymbolKind, DefinitionLocation, HoverInfo, ImportInfo,
     MemberAccessContext, ParameterInfo, ParserEngine, ReferenceLocation, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SignatureInfo, SymbolLocation, SyntaxError,
 };
+pub use toolchain::{CompilerCommand, FormatterCommand, ToolSource};

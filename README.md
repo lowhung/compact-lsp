@@ -46,8 +46,8 @@ Utils_add(5, 5);  // Completion, hover, go-to-def, find refs, rename, signature 
 ## Requirements
 
 - Rust toolchain (for building)
-- `compactc` compiler (for diagnostics)
-- `format-compact` (optional, for formatting)
+- The `compact` CLI with a Compact 0.33 toolchain (recommended)
+- A direct `compactc` and `format-compact` installation is also supported
 
 ## Building
 
@@ -57,12 +57,34 @@ cargo build --release
 
 Binary: `target/release/compact-lsp`
 
-## Compiler Location
+## Compact Toolchain
 
-The LSP auto-detects `compactc.bin`:
-1. `COMPACT_COMPILER` environment variable
-2. `~/compactc/compactc.bin`
-3. `compactc.bin` in PATH
+The LSP prefers the current `compact` CLI and falls back to direct compiler
+binaries. Discovery order is:
+
+1. `COMPACT_COMPILER` or `COMPACT_FORMATTER` for explicit direct binaries
+2. `COMPACT_CLI`
+3. `compact` in `PATH` or `~/.local/bin/compact`
+4. `compactc`, `compactc.bin`, or `format-compact` in `PATH`
+5. Modern `~/.compact/bin` and legacy `~/compactc` binary locations
+
+Set `COMPACT_TOOLCHAIN_VERSION` to select a compiler installed by the Compact
+CLI:
+
+```bash
+export COMPACT_TOOLCHAIN_VERSION=0.33.0
+```
+
+Project-specific compiler flags are accepted as a JSON string array. For
+example, secp256k1 Compact programs require ZKIR v3:
+
+```bash
+export COMPACT_COMPILER_ARGS='["--feature-zkir-v3"]'
+```
+
+At startup, the server logs the detected compiler and language versions and
+warns when the compiler is outside the primary Compact 0.33 compatibility
+target.
 
 ## Related Projects
 

@@ -2,155 +2,235 @@
 // Copyright (C) 2025 Midnight Foundation
 // SPDX-License-Identifier: Apache-2.0
 
-//! Diagnostic engine that wraps the compactc compiler.
-//!
-//! # How it works
-//!
-//! 1. We receive a file path from the LSP server
-//! 2. We invoke `compactc.bin --vscode <file> <temp_dir>`
-//! 3. We parse stderr for error messages in the format:
-//!    `Exception: <filename> line <line> char <col>: <message>`
-//! 4. We convert these to LSP Diagnostic objects
+//! Diagnostic engine backed by the Compact compiler.
 
-// LSP types for diagnostics
-// We use ls-types (aliased as lsp-types in Cargo.toml), which is compatible with tower-lsp-server
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use regex::Regex;
+use semver::Version;
 
-/// The diagnostic engine that wraps the compactc compiler.
-///
-/// This is the main interface between the LSP and the compiler.
+use crate::toolchain::{CompilerCommand, ToolSource};
+
+/// Compatibility level between the detected compiler and this LSP release.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilerCompatibility {
+    /// The primary Compact 0.33 compatibility target.
+    Primary,
+    /// Compact 0.32 is supported where it shares the 0.33 implementation path.
+    BestEffort,
+    /// The compiler is outside the currently supported version range.
+    Unsupported,
+    /// The compiler did not return a semantic version.
+    Unknown,
+}
+
+/// Compiler and language versions reported by the selected toolchain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilerInfo {
+    pub compiler_version: String,
+    pub language_version: String,
+    pub compatibility: CompilerCompatibility,
+}
+
+/// The diagnostic engine that wraps either the `compact` CLI or `compactc`.
+#[derive(Debug)]
 pub struct DiagnosticEngine {
-    /// Path to the compactc.bin compiler
-    compiler_path: Option<String>,
+    compiler: Option<CompilerCommand>,
 }
 
 impl DiagnosticEngine {
-    /// Create a new diagnostic engine, auto-detecting the compiler location.
+    /// Create a diagnostic engine using automatic toolchain discovery.
     pub fn new() -> Self {
-        let compiler_path = Self::find_compiler();
-        Self { compiler_path }
+        let compiler = CompilerCommand::discover();
+
+        if let Some(compiler) = &compiler {
+            tracing::info!(
+                "Found Compact compiler via {:?}: {}",
+                compiler.source(),
+                compiler.executable().display()
+            );
+        } else {
+            tracing::warn!("Could not find the Compact CLI or a compactc compiler");
+        }
+
+        Self { compiler }
     }
 
-    /// Try to find the compactc.bin compiler in common locations.
-    ///
-    /// Search order:
-    /// 1. COMPACT_COMPILER environment variable
-    /// 2. ~/compactc/compactc.bin
-    /// 3. compactc.bin in PATH
-    fn find_compiler() -> Option<String> {
-        // 1. Check environment variable
-        if let Ok(path) = std::env::var("COMPACT_COMPILER") {
-            if std::path::Path::new(&path).exists() {
-                tracing::info!("Found compiler via COMPACT_COMPILER env: {}", path);
-                return Some(path);
-            }
+    /// Create an engine with a known compiler command.
+    pub fn with_compiler(compiler: CompilerCommand) -> Self {
+        Self {
+            compiler: Some(compiler),
         }
-
-        // 2. Check ~/compactc/compactc.bin
-        if let Ok(home) = std::env::var("HOME") {
-            let path = std::path::Path::new(&home)
-                .join("compactc")
-                .join("compactc.bin");
-            if path.exists() {
-                let path_str = path.to_string_lossy().to_string();
-                tracing::info!("Found compiler at: {}", path_str);
-                return Some(path_str);
-            }
-        }
-
-        // 3. Check PATH
-        if let Ok(output) = std::process::Command::new("which")
-            .arg("compactc.bin")
-            .output()
-        {
-            if output.status.success() {
-                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                tracing::info!("Found compiler in PATH: {}", path);
-                return Some(path);
-            }
-        }
-
-        tracing::warn!("Could not find compactc.bin compiler");
-        None
     }
 
-    /// Check if the compiler was found.
+    /// Check whether a compiler command was discovered.
     pub fn is_available(&self) -> bool {
-        self.compiler_path.is_some()
+        self.compiler.is_some()
     }
 
-    /// Run diagnostics on a file and return LSP Diagnostic objects.
-    ///
-    /// # How it works
-    ///
-    /// 1. Extract file path from URI (file:///path/to/file.compact)
-    /// 2. Create temp directory for compiler output
-    /// 3. Run: `compactc.bin --vscode <file> <temp_dir>`
-    /// 4. Parse stderr for error messages
-    /// 5. Return LSP Diagnostic objects
+    /// Describe how the compiler was discovered.
+    pub fn source(&self) -> Option<ToolSource> {
+        self.compiler.as_ref().map(CompilerCommand::source)
+    }
+
+    /// Query the selected compiler and language versions.
+    pub async fn compiler_info(&self) -> Result<Option<CompilerInfo>, String> {
+        let Some(compiler) = &self.compiler else {
+            return Ok(None);
+        };
+
+        let compiler_version = self.query_info(compiler, "--version").await?;
+        let language_version = self.query_info(compiler, "--language-version").await?;
+        let compatibility = compiler_compatibility(&compiler_version);
+
+        Ok(Some(CompilerInfo {
+            compiler_version,
+            language_version,
+            compatibility,
+        }))
+    }
+
+    /// Run diagnostics against the file on disk.
     pub async fn diagnose(&self, uri: &str, _content: &str) -> Vec<Diagnostic> {
-        // Check if compiler is available
-        let compiler_path = match &self.compiler_path {
-            Some(path) => path,
-            None => {
-                tracing::warn!("Compiler not available, skipping diagnostics");
+        let Some(compiler) = &self.compiler else {
+            tracing::warn!("Compiler not available, skipping diagnostics");
+            return Vec::new();
+        };
+
+        let file_path = match file_uri_to_path(uri) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!("Could not convert diagnostic URI to a file path: {}", error);
                 return Vec::new();
             }
         };
 
-        // Extract file path from URI (e.g., "file:///path/to/file.compact" -> "/path/to/file.compact")
-        let file_path = match uri.strip_prefix("file://") {
-            Some(path) => path,
-            None => {
-                tracing::warn!("Invalid URI format: {}", uri);
-                return Vec::new();
-            }
-        };
-
-        // Check if file exists
-        if !std::path::Path::new(file_path).exists() {
-            tracing::warn!("File does not exist: {}", file_path);
+        if !file_path.is_file() {
+            tracing::warn!("File does not exist: {}", file_path.display());
             return Vec::new();
         }
 
-        // Create temp directory for compiler output
-        let temp_dir = match tempfile::tempdir() {
+        let output_dir = match tempfile::tempdir() {
             Ok(dir) => dir,
-            Err(e) => {
-                tracing::error!("Failed to create temp directory: {}", e);
+            Err(error) => {
+                tracing::error!("Failed to create compiler output directory: {}", error);
                 return Vec::new();
             }
         };
 
-        tracing::debug!(
-            "Running compiler: {} --vscode {} {}",
-            compiler_path,
-            file_path,
-            temp_dir.path().display()
-        );
+        self.run_compiler(compiler, &file_path, output_dir.path())
+            .await
+    }
 
-        // Run the compiler
-        // compactc.bin --vscode <source-file> <output-dir>
-        let output = match tokio::process::Command::new(compiler_path)
-            .arg("--vscode")
-            .arg("--skip-zk") // Skip ZK key generation for faster diagnostics
-            .arg(file_path)
-            .arg(temp_dir.path())
+    /// Run diagnostics against in-memory content while keeping relative imports
+    /// anchored to the original file's directory.
+    pub async fn diagnose_content(&self, uri: &str, content: &str) -> Vec<Diagnostic> {
+        let Some(compiler) = &self.compiler else {
+            tracing::trace!("Compiler not available, skipping live diagnostics");
+            return Vec::new();
+        };
+
+        let original_path = match file_uri_to_path(uri) {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!("Could not convert diagnostic URI to a file path: {}", error);
+                return Vec::new();
+            }
+        };
+
+        let Some(original_dir) = original_path.parent() else {
+            tracing::warn!(
+                "Could not determine the source directory for {}",
+                original_path.display()
+            );
+            return Vec::new();
+        };
+
+        let temporary_source = match tempfile::Builder::new()
+            .prefix(".compact-lsp-")
+            .suffix(".compact")
+            .tempfile_in(original_dir)
+        {
+            Ok(file) => file,
+            Err(error) => {
+                tracing::error!(
+                    "Failed to create a temporary source beside {}: {}",
+                    original_path.display(),
+                    error
+                );
+                return Vec::new();
+            }
+        };
+
+        if let Err(error) = tokio::fs::write(temporary_source.path(), content).await {
+            tracing::error!("Failed to write temporary source: {}", error);
+            return Vec::new();
+        }
+
+        let output_dir = match tempfile::tempdir() {
+            Ok(dir) => dir,
+            Err(error) => {
+                tracing::error!("Failed to create compiler output directory: {}", error);
+                return Vec::new();
+            }
+        };
+
+        self.run_compiler(compiler, temporary_source.path(), output_dir.path())
+            .await
+    }
+
+    async fn query_info(&self, compiler: &CompilerCommand, flag: &str) -> Result<String, String> {
+        let args = compiler.info_arguments(flag);
+        let output = compiler
+            .command(&args)
             .output()
             .await
-        {
+            .map_err(|error| format!("failed to query compiler {flag}: {error}"))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            return Err(if stderr.is_empty() {
+                format!("compiler {flag} exited with {}", output.status)
+            } else {
+                format!("compiler {flag} failed: {stderr}")
+            });
+        }
+
+        let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if version.is_empty() {
+            Err(format!("compiler {flag} returned an empty version"))
+        } else {
+            Ok(version)
+        }
+    }
+
+    async fn run_compiler(
+        &self,
+        compiler: &CompilerCommand,
+        source: &Path,
+        output_dir: &Path,
+    ) -> Vec<Diagnostic> {
+        let args = compiler.compile_arguments(source, output_dir);
+        tracing::debug!(
+            "Running Compact compiler: {} {:?}",
+            compiler.executable().display(),
+            args
+        );
+
+        let output = match compiler.command(&args).output().await {
             Ok(output) => output,
-            Err(e) => {
-                tracing::error!("Failed to run compiler: {}", e);
+            Err(error) => {
+                tracing::error!("Failed to run Compact compiler: {}", error);
                 return Vec::new();
             }
         };
 
-        // Parse stderr for errors
+        tracing::debug!("Compiler exit status: {}", output.status);
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
 
-        tracing::debug!("Compiler exit code: {:?}", output.status.code());
         if !stderr.is_empty() {
             tracing::debug!("Compiler stderr: {}", stderr);
         }
@@ -158,128 +238,11 @@ impl DiagnosticEngine {
             tracing::trace!("Compiler stdout: {}", stdout);
         }
 
-        // Collect diagnostics from both stderr and stdout
-        let mut diagnostics = Vec::new();
-
-        for line in stderr.lines().chain(stdout.lines()) {
-            if let Some(diag) = parse_error_line(line) {
-                diagnostics.push(diag);
-            }
-        }
-
-        tracing::info!(
-            "Diagnostics for {}: {} error(s)",
-            file_path,
-            diagnostics.len()
-        );
-
-        diagnostics
-    }
-
-    /// Run diagnostics on in-memory content (without requiring file save).
-    ///
-    /// This writes the content to a temporary file and runs the compiler on it.
-    /// Useful for live diagnostics while typing.
-    ///
-    /// # Arguments
-    ///
-    /// * `uri` - The original file URI (for logging and path resolution)
-    /// * `content` - The current in-memory content to diagnose
-    pub async fn diagnose_content(&self, uri: &str, content: &str) -> Vec<Diagnostic> {
-        // Check if compiler is available
-        let compiler_path = match &self.compiler_path {
-            Some(path) => path,
-            None => {
-                tracing::trace!("Compiler not available, skipping live diagnostics");
-                return Vec::new();
-            }
-        };
-
-        // Extract file path from URI to get the directory (for imports to resolve)
-        let original_path = match uri.strip_prefix("file://") {
-            Some(path) => path,
-            None => {
-                tracing::warn!("Invalid URI format: {}", uri);
-                return Vec::new();
-            }
-        };
-
-        // Get the directory of the original file for proper import resolution
-        let original_dir = match std::path::Path::new(original_path).parent() {
-            Some(dir) => dir,
-            None => {
-                tracing::warn!("Could not get parent directory: {}", original_path);
-                return Vec::new();
-            }
-        };
-
-        // Create temp file in the same directory as the original file
-        // This ensures imports resolve correctly
-        let temp_file_name = format!(".compact-lsp-temp-{}.compact", std::process::id());
-        let temp_file_path = original_dir.join(&temp_file_name);
-
-        // Write content to temp file
-        if let Err(e) = std::fs::write(&temp_file_path, content) {
-            tracing::error!("Failed to write temp file: {}", e);
-            return Vec::new();
-        }
-
-        // Create temp directory for compiler output
-        let temp_output_dir = match tempfile::tempdir() {
-            Ok(dir) => dir,
-            Err(e) => {
-                tracing::error!("Failed to create temp directory: {}", e);
-                let _ = std::fs::remove_file(&temp_file_path);
-                return Vec::new();
-            }
-        };
-
-        tracing::trace!(
-            "Running live diagnostics: {} --vscode {} {}",
-            compiler_path,
-            temp_file_path.display(),
-            temp_output_dir.path().display()
-        );
-
-        // Run the compiler
-        let output = match tokio::process::Command::new(compiler_path)
-            .arg("--vscode")
-            .arg("--skip-zk")
-            .arg(&temp_file_path)
-            .arg(temp_output_dir.path())
-            .output()
-            .await
-        {
-            Ok(output) => output,
-            Err(e) => {
-                tracing::error!("Failed to run compiler: {}", e);
-                let _ = std::fs::remove_file(&temp_file_path);
-                return Vec::new();
-            }
-        };
-
-        // Clean up temp file
-        let _ = std::fs::remove_file(&temp_file_path);
-
-        // Parse stderr and stdout for errors
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
-
-        let mut diagnostics = Vec::new();
-
-        for line in stderr.lines().chain(stdout.lines()) {
-            if let Some(diag) = parse_error_line(line) {
-                diagnostics.push(diag);
-            }
-        }
-
-        tracing::trace!(
-            "Live diagnostics for {}: {} error(s)",
-            uri,
-            diagnostics.len()
-        );
-
-        diagnostics
+        stderr
+            .lines()
+            .chain(stdout.lines())
+            .filter_map(parse_error_line)
+            .collect()
     }
 }
 
@@ -289,36 +252,52 @@ impl Default for DiagnosticEngine {
     }
 }
 
-/// Parse a single error line from compactc output.
+fn compiler_compatibility(version: &str) -> CompilerCompatibility {
+    let Ok(version) = Version::parse(version.trim_start_matches('v')) else {
+        return CompilerCompatibility::Unknown;
+    };
+
+    match (version.major, version.minor) {
+        (0, 33) => CompilerCompatibility::Primary,
+        (0, 32) => CompilerCompatibility::BestEffort,
+        _ => CompilerCompatibility::Unsupported,
+    }
+}
+
+fn file_uri_to_path(uri: &str) -> Result<PathBuf, String> {
+    let uri = url::Url::parse(uri).map_err(|error| format!("invalid URI: {error}"))?;
+    if uri.scheme() != "file" {
+        return Err(format!("unsupported URI scheme: {}", uri.scheme()));
+    }
+
+    uri.to_file_path()
+        .map_err(|_| "file URI cannot be represented as a local path".to_string())
+}
+
+/// Parse a single Compact compiler error line.
 ///
-/// Format: `Exception: <filename> line <line> char <col>: <message>`
-///
-/// Returns None if the line doesn't match the expected format.
+/// Format: `Exception: <filename> line <line> char <col>: <message>`.
 fn parse_error_line(line: &str) -> Option<Diagnostic> {
-    // Regex pattern for compiler errors
-    let re =
-        regex::Regex::new(r"^Exception:\s*(\S+)\s+line\s+(\d+)\s+char\s+(\d+):\s*(.+)$").ok()?;
+    static ERROR_PATTERN: OnceLock<Regex> = OnceLock::new();
+    let pattern = ERROR_PATTERN.get_or_init(|| {
+        Regex::new(r"^Exception:\s*(.+?)\s+line\s+(\d+)\s+char\s+(\d+):\s*(.+)$")
+            .expect("compiler diagnostic regex must be valid")
+    });
 
-    let caps = re.captures(line)?;
+    let captures = pattern.captures(line)?;
+    let line_num: u32 = captures.get(2)?.as_str().parse().ok()?;
+    let column: u32 = captures.get(3)?.as_str().parse().ok()?;
+    let message = captures.get(4)?.as_str().to_string();
 
-    let _filename = caps.get(1)?.as_str();
-    let line_num: u32 = caps.get(2)?.as_str().parse().ok()?;
-    let col: u32 = caps.get(3)?.as_str().parse().ok()?;
-    let message = caps.get(4)?.as_str().to_string();
-
-    // LSP uses 0-indexed lines and columns, compiler uses 1-indexed
-    let line_0 = line_num.saturating_sub(1);
-    let col_0 = col.saturating_sub(1);
+    let line = line_num.saturating_sub(1);
+    let character = column.saturating_sub(1);
 
     Some(Diagnostic {
         range: Range {
-            start: Position {
-                line: line_0,
-                character: col_0,
-            },
+            start: Position { line, character },
             end: Position {
-                line: line_0,
-                character: col_0 + 1, // Highlight at least one character
+                line,
+                character: character + 1,
             },
         },
         severity: Some(DiagnosticSeverity::ERROR),
@@ -333,30 +312,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_error_line() {
-        let line = "Exception: broken.compact line 1 char 1: parse error: found \"this\" looking for a program element or end of file";
-        let diag = parse_error_line(line).expect("Should parse error line");
+    fn parses_compiler_error() {
+        let line = "Exception: broken.compact line 1 char 1: parse error: unexpected token";
+        let diagnostic = parse_error_line(line).expect("expected compiler diagnostic");
 
-        assert_eq!(diag.range.start.line, 0); // 1-indexed -> 0-indexed
-        assert_eq!(diag.range.start.character, 0);
-        assert_eq!(diag.severity, Some(DiagnosticSeverity::ERROR));
-        assert!(diag.message.contains("parse error"));
-        assert_eq!(diag.source, Some("compactc".to_string()));
+        assert_eq!(diagnostic.range.start.line, 0);
+        assert_eq!(diagnostic.range.start.character, 0);
+        assert_eq!(diagnostic.severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(diagnostic.source.as_deref(), Some("compactc"));
+        assert!(diagnostic.message.contains("parse error"));
     }
 
     #[test]
-    fn test_parse_type_error() {
-        let line = "Exception: broken3.compact line 4 char 3: mismatch between actual return type Bytes<12> and declared return type Uint<64> of circuit test";
-        let diag = parse_error_line(line).expect("Should parse type error");
+    fn parses_error_for_path_containing_spaces() {
+        let line =
+            "Exception: /tmp/Compact Project/broken name.compact line 4 char 3: type mismatch";
+        let diagnostic = parse_error_line(line).expect("expected compiler diagnostic");
 
-        assert_eq!(diag.range.start.line, 3); // line 4 -> index 3
-        assert_eq!(diag.range.start.character, 2); // char 3 -> index 2
-        assert!(diag.message.contains("mismatch"));
+        assert_eq!(diagnostic.range.start.line, 3);
+        assert_eq!(diagnostic.range.start.character, 2);
+        assert_eq!(diagnostic.message, "type mismatch");
     }
 
     #[test]
-    fn test_parse_invalid_line() {
-        let line = "This is not an error line";
-        assert!(parse_error_line(line).is_none());
+    fn ignores_non_diagnostic_output() {
+        assert!(parse_error_line("This is not an error line").is_none());
+    }
+
+    #[test]
+    fn decodes_file_uri_paths() {
+        let path = file_uri_to_path("file:///tmp/Compact%20Project/example.compact").unwrap();
+        assert_eq!(path, PathBuf::from("/tmp/Compact Project/example.compact"));
+    }
+
+    #[test]
+    fn rejects_non_file_uris() {
+        let error = file_uri_to_path("untitled:example.compact").unwrap_err();
+        assert!(error.contains("unsupported URI scheme"));
+    }
+
+    #[test]
+    fn classifies_compiler_versions() {
+        assert_eq!(
+            compiler_compatibility("0.33.0-rc.2"),
+            CompilerCompatibility::Primary
+        );
+        assert_eq!(
+            compiler_compatibility("0.32.111"),
+            CompilerCompatibility::BestEffort
+        );
+        assert_eq!(
+            compiler_compatibility("0.31.1"),
+            CompilerCompatibility::Unsupported
+        );
+        assert_eq!(
+            compiler_compatibility("development"),
+            CompilerCompatibility::Unknown
+        );
     }
 }

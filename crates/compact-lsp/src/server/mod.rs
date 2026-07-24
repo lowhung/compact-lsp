@@ -22,7 +22,9 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use compact_analyzer::{CompletionSymbol, DiagnosticEngine, FormatterEngine, ParserEngine};
+use compact_analyzer::{
+    CompilerCompatibility, CompletionSymbol, DiagnosticEngine, FormatterEngine, ParserEngine,
+};
 use dashmap::DashMap;
 use lsp_types::*;
 use ropey::Rope;
@@ -568,6 +570,49 @@ impl LanguageServer for CompactLanguageServer {
 
     async fn initialized(&self, _params: InitializedParams) {
         tracing::info!("Server initialized - handshake complete");
+
+        match self.diagnostic_engine.compiler_info().await {
+            Ok(Some(info)) => {
+                let message = format!(
+                    "Compact compiler {} (language {})",
+                    info.compiler_version, info.language_version
+                );
+
+                match info.compatibility {
+                    CompilerCompatibility::Primary => {
+                        tracing::info!("{}", message);
+                        self.client.log_message(MessageType::INFO, message).await;
+                    }
+                    CompilerCompatibility::BestEffort => {
+                        let message = format!(
+                            "{}; Compact 0.32 support is best-effort (0.33 is the primary target)",
+                            message
+                        );
+                        tracing::warn!("{}", message);
+                        self.client.log_message(MessageType::WARNING, message).await;
+                    }
+                    CompilerCompatibility::Unsupported | CompilerCompatibility::Unknown => {
+                        let message = format!(
+                            "{}; this compiler is outside the Compact 0.33 compatibility target",
+                            message
+                        );
+                        tracing::warn!("{}", message);
+                        self.client.log_message(MessageType::WARNING, message).await;
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!("Could not query Compact compiler version: {}", error);
+                self.client
+                    .log_message(
+                        MessageType::WARNING,
+                        format!("Could not query Compact compiler version: {}", error),
+                    )
+                    .await;
+            }
+        }
+
         self.scan_workspace().await;
         self.client
             .log_message(MessageType::INFO, "Compact LSP server ready")
