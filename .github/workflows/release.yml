@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
   workflow_dispatch: {}
@@ -32,7 +34,7 @@ jobs:
           package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compact-lsp") | .version')"
           extension_version="$(jq -r '.version' editors/vscode/package.json)"
           test "${extension_version}" = "${package_version}"
-          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
             test "v${package_version}" = "${GITHUB_REF_NAME}"
           fi
 
@@ -121,7 +123,7 @@ jobs:
           Compress-Archive -Path package/* -DestinationPath "${{ matrix.artifact }}.${{ matrix.archive }}"
 
       - name: Attest release archive
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         uses: actions/attest@v4
         with:
           create-storage-record: false
@@ -168,7 +170,7 @@ jobs:
         run: npm run package -- --out "compact-lsp-vscode-${GITHUB_REF_NAME}.vsix"
 
       - name: Attest VSIX
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         uses: actions/attest@v4
         with:
           create-storage-record: false
@@ -206,21 +208,21 @@ jobs:
           test -s SHA256SUMS
 
       - name: Attest checksum manifest
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         uses: actions/attest@v4
         with:
           create-storage-record: false
           subject-path: artifacts/SHA256SUMS
 
       - name: Create GitHub release
-        if: github.event_name == 'push'
+        if: github.ref_type == 'tag'
         uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
 
       - name: Upload dry-run bundle
-        if: github.event_name == 'workflow_dispatch'
+        if: github.ref_type != 'tag'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: compact-lsp-release-dry-run-${{ github.sha }}
