@@ -40,11 +40,17 @@ struct IndexedWorkspaceFile {
     imports: Vec<ImportInfo>,
 }
 
+/// A sortable workspace-symbol result plus the stable keys used to rank and deduplicate it.
 struct WorkspaceSymbolCandidate {
+    /// Query match quality: exact, prefix, substring, or an unfiltered empty-query match.
     match_rank: u8,
+    /// Lowercase symbol name used for case-insensitive matching and ordering.
     normalized_name: String,
+    /// Stable secondary ordering for Compact declaration kinds.
     kind_rank: u8,
+    /// Canonical document URI used to keep multi-root results deterministic.
     uri: String,
+    /// LSP payload returned to the client after sorting and deduplication.
     information: SymbolInformation,
 }
 
@@ -549,6 +555,11 @@ impl CompactLanguageServer {
         }
     }
 
+    /// Build a deterministic `workspace/symbol` response from a symbol-cache snapshot.
+    ///
+    /// Taking owned entries ensures no `DashMap` guard is held while the results are
+    /// filtered and sorted. Identical declarations are deduplicated by kind, URI,
+    /// name, and UTF-16 range, while distinct declarations with the same name remain.
     fn workspace_symbol_results(
         entries: Vec<(String, Vec<CompletionSymbol>)>,
         query: &str,
@@ -662,6 +673,10 @@ impl CompactLanguageServer {
             .collect()
     }
 
+    /// Rank a normalized symbol name against a normalized query.
+    ///
+    /// Lower values sort first. Empty queries intentionally include every cached
+    /// declaration, while non-matches are excluded.
     fn workspace_symbol_match_rank(name: &str, query: &str) -> Option<u8> {
         if query.is_empty() {
             Some(3)
@@ -676,6 +691,7 @@ impl CompactLanguageServer {
         }
     }
 
+    /// Convert an analyzer declaration kind to its LSP kind and stable sort rank.
     fn workspace_symbol_kind(kind: compact_analyzer::CompletionSymbolKind) -> (SymbolKind, u8) {
         match kind {
             compact_analyzer::CompletionSymbolKind::Function => (SymbolKind::FUNCTION, 0),
@@ -1851,6 +1867,7 @@ impl LanguageServer for CompactLanguageServer {
         Ok(Some(DocumentSymbolResponse::Nested(symbols)))
     }
 
+    /// Search the current open-document and indexed-workspace symbol cache.
     async fn symbol(
         &self,
         params: WorkspaceSymbolParams,
