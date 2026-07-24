@@ -151,6 +151,38 @@ impl LspHarness {
         }
     }
 
+    async fn wait_for_diagnostic(
+        &mut self,
+        uri: &str,
+        version: i64,
+        expected_message: &str,
+    ) -> Value {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let message = self.next_message().await;
+                if message.get("method").and_then(Value::as_str)
+                    != Some("textDocument/publishDiagnostics")
+                    || message["params"]["uri"].as_str() != Some(uri)
+                    || message["params"]["version"].as_i64() != Some(version)
+                {
+                    continue;
+                }
+                if message["params"]["diagnostics"]
+                    .as_array()
+                    .is_some_and(|diagnostics| {
+                        diagnostics
+                            .iter()
+                            .any(|diagnostic| diagnostic["message"] == expected_message)
+                    })
+                {
+                    return message;
+                }
+            }
+        })
+        .await
+        .expect("expected diagnostics were not published")
+    }
+
     async fn completion_labels(&mut self, uri: &str) -> HashSet<String> {
         let result = self
             .request(
@@ -235,6 +267,180 @@ fn file_uri(path: &Path) -> String {
     url::Url::from_file_path(path)
         .expect("absolute path")
         .to_string()
+}
+
+async fn wait_for_pid_file(path: &Path) -> String {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            if let Ok(pid) = std::fs::read_to_string(path) {
+                if !pid.trim().is_empty() {
+                    return pid;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("mock compiler did not start")
+}
+
+async fn wait_for_process_exit(pid: &str) {
+    tokio::time::timeout(Duration::from_secs(8), async {
+        loop {
+            let status = std::process::Command::new("kill")
+                .args(["-0", pid.trim()])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .expect("check mock compiler process");
+            if !status.success() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("cancelled compiler process remained alive");
+}
+
+#[tokio::test]
+async fn semantic_diagnostics_cancel_stale_close_and_shutdown_work() {
+    tokio::time::timeout(Duration::from_secs(30), run_diagnostic_cancellation())
+        .await
+        .expect("diagnostic cancellation test timed out");
+}
+
+async fn run_diagnostic_cancellation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let pid_file = temporary.path().join("compiler-pid");
+    let compiler = temporary.path().join("compactc");
+    let script = format!(
+        r#"#!/bin/sh
+case "$1" in
+  --version) printf '0.33.0\n'; exit 0 ;;
+  --language-version) printf '0.25.0\n'; exit 0 ;;
+esac
+content=$(cat "$3")
+case "$content" in
+  *slow*)
+    printf '%s' "$$" > "{}"
+    sleep 30
+    printf 'Exception: %s line 1 char 1: stale type error\n' "$3"
+    ;;
+  *fresh*)
+    printf 'Exception: %s line 1 char 1: fresh type error\n' "$3"
+    ;;
+esac
+"#,
+        pid_file.display()
+    );
+    std::fs::write(&compiler, script).unwrap();
+    let mut permissions = std::fs::metadata(&compiler).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&compiler, permissions).unwrap();
+
+    let source_path = temporary.path().join("Main.compact");
+    let initial_source = "/* fresh */ export circuit main(): Field { return 0; }";
+    std::fs::write(&source_path, initial_source).unwrap();
+    let uri = file_uri(&source_path);
+    let root_uri = file_uri(temporary.path());
+    let mut lsp = LspHarness::start(&compiler).await;
+    lsp.request(
+        "initialize",
+        json!({
+            "processId": null,
+            "capabilities": {},
+            "workspaceFolders": [{ "uri": root_uri, "name": "diagnostics" }],
+            "rootUri": null
+        }),
+    )
+    .await;
+    lsp.notify("initialized", json!({})).await;
+    lsp.wait_until_ready().await;
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": initial_source
+            }
+        }),
+    )
+    .await;
+    lsp.wait_for_diagnostic(&uri, 1, "fresh type error").await;
+
+    lsp.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{
+                "text": "/* slow */ export circuit main(): Field { return 1; }"
+            }]
+        }),
+    )
+    .await;
+    let stale_pid = wait_for_pid_file(&pid_file).await;
+    lsp.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 3 },
+            "contentChanges": [{
+                "text": "/* fresh */ export circuit main(): Field { return 2; }"
+            }]
+        }),
+    )
+    .await;
+    let diagnostic = lsp.wait_for_diagnostic(&uri, 3, "fresh type error").await;
+    assert_eq!(diagnostic["params"]["diagnostics"][0]["source"], "compactc");
+    wait_for_process_exit(&stale_pid).await;
+
+    let _ = std::fs::remove_file(&pid_file);
+    lsp.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 4 },
+            "contentChanges": [{
+                "text": "/* slow close */ export circuit main(): Field { return 3; }"
+            }]
+        }),
+    )
+    .await;
+    let close_pid = wait_for_pid_file(&pid_file).await;
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": uri } }),
+    )
+    .await;
+    wait_for_process_exit(&close_pid).await;
+
+    let _ = std::fs::remove_file(&pid_file);
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": initial_source
+            }
+        }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": uri, "version": 2 },
+            "contentChanges": [{
+                "text": "/* slow shutdown */ export circuit main(): Field { return 4; }"
+            }]
+        }),
+    )
+    .await;
+    let shutdown_pid = wait_for_pid_file(&pid_file).await;
+    lsp.shutdown().await;
+    wait_for_process_exit(&shutdown_pid).await;
 }
 
 #[tokio::test]
