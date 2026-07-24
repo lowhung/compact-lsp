@@ -25,8 +25,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use compact_analyzer::{
-    CompilerCompatibility, CompletionSymbol, DiagnosticEngine, FormatterEngine, ImportInfo,
-    ParserEngine,
+    CallHierarchyDocument, CircuitDefinition, CompilerCompatibility, CompletionSymbol,
+    DiagnosticEngine, FormatterEngine, ImportInfo, ParserEngine,
 };
 use dashmap::DashMap;
 use lsp_types::*;
@@ -45,6 +45,14 @@ struct IndexedWorkspaceFile {
     symbols: Vec<CompletionSymbol>,
     /// Imports used to rebuild reverse dependency edges after the scan.
     imports: Vec<ImportInfo>,
+}
+
+/// One cached document parsed for a call-hierarchy request.
+struct CallHierarchyFile {
+    /// Canonical cache URI used for import resolution and result identity.
+    uri: String,
+    /// Circuits, direct calls, and imports from one syntax-tree snapshot.
+    document: CallHierarchyDocument,
 }
 
 /// A sortable workspace-symbol result plus the stable keys used to rank and deduplicate it.
@@ -132,6 +140,140 @@ pub struct CompactLanguageServer {
 }
 
 impl CompactLanguageServer {
+    /// Build a request-local call graph from the current source-cache snapshot.
+    ///
+    /// A private parser avoids holding the shared interactive parser mutex while
+    /// scanning the workspace. Watched-file and open-document updates replace
+    /// `source_cache`, so requests use the latest cached snapshot available for
+    /// each file.
+    fn call_hierarchy_files(&self) -> Vec<CallHierarchyFile> {
+        let mut sources = self
+            .source_cache
+            .iter()
+            .map(|entry| (entry.key().clone(), entry.value().clone()))
+            .collect::<Vec<_>>();
+        sources.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut parser = ParserEngine::new();
+        sources
+            .into_iter()
+            .map(|(uri, source)| CallHierarchyFile {
+                uri,
+                document: parser.call_hierarchy(&source),
+            })
+            .collect()
+    }
+
+    /// Resolve a source-level call name to exactly one local or imported circuit.
+    ///
+    /// Local declarations and file imports are considered together. Duplicate
+    /// declarations, colliding unprefixed imports, and any other ambiguity return
+    /// `None` instead of inventing a semantic edge.
+    fn resolve_call_target<'a>(
+        files: &'a [CallHierarchyFile],
+        caller: &'a CallHierarchyFile,
+        rendered_name: &str,
+    ) -> Option<(&'a CallHierarchyFile, &'a CircuitDefinition)> {
+        let mut candidates = caller
+            .document
+            .circuits
+            .iter()
+            .filter(|circuit| circuit.name == rendered_name)
+            .map(|circuit| (caller, circuit))
+            .collect::<Vec<_>>();
+
+        for import in &caller.document.imports {
+            if !import.is_file {
+                continue;
+            }
+            let target_name = match import.prefix.as_deref() {
+                Some(prefix) => match rendered_name.strip_prefix(prefix) {
+                    Some(name) if !name.is_empty() => name,
+                    _ => continue,
+                },
+                None => rendered_name,
+            };
+            let Some(import_uri) = imports::resolve_import_path(&caller.uri, &import.path) else {
+                continue;
+            };
+            let import_uri = Self::cache_uri(&import_uri);
+            let Some(imported_file) = files.iter().find(|file| file.uri == import_uri) else {
+                continue;
+            };
+            candidates.extend(
+                imported_file
+                    .document
+                    .circuits
+                    .iter()
+                    .filter(|circuit| circuit.name == target_name)
+                    .map(|circuit| (imported_file, circuit)),
+            );
+        }
+
+        candidates.sort_by(|(left_file, left), (right_file, right)| {
+            left_file
+                .uri
+                .cmp(&right_file.uri)
+                .then(
+                    left.selection_range
+                        .start
+                        .line
+                        .cmp(&right.selection_range.start.line),
+                )
+                .then(
+                    left.selection_range
+                        .start
+                        .character
+                        .cmp(&right.selection_range.start.character),
+                )
+        });
+        candidates.dedup_by(|(left_file, left), (right_file, right)| {
+            left_file.uri == right_file.uri && left.selection_range == right.selection_range
+        });
+
+        if candidates.len() == 1 {
+            candidates.pop()
+        } else {
+            None
+        }
+    }
+
+    /// Find the exact cached circuit represented by a client-round-tripped item.
+    fn circuit_for_item<'a>(
+        files: &'a [CallHierarchyFile],
+        item: &CallHierarchyItem,
+    ) -> Option<(&'a CallHierarchyFile, &'a CircuitDefinition)> {
+        let item_uri = Self::cache_uri(&item.uri.to_string());
+        let file = files.iter().find(|file| file.uri == item_uri)?;
+        let circuit = file.document.circuits.iter().find(|circuit| {
+            circuit.name == item.name && circuit.selection_range == item.selection_range
+        })?;
+        Some((file, circuit))
+    }
+
+    /// Convert one analyzer circuit into the protocol item preserved by clients.
+    fn call_hierarchy_item(
+        file: &CallHierarchyFile,
+        circuit: &CircuitDefinition,
+    ) -> Option<CallHierarchyItem> {
+        Some(CallHierarchyItem {
+            name: circuit.name.clone(),
+            kind: SymbolKind::FUNCTION,
+            tags: None,
+            detail: Some("circuit".to_string()),
+            uri: file.uri.parse::<Uri>().ok()?,
+            range: circuit.range,
+            selection_range: circuit.selection_range,
+            data: None,
+        })
+    }
+
+    /// Stable identity used to group duplicate call sites without collapsing
+    /// distinct declarations that happen to share a name.
+    fn same_call_hierarchy_item(left: &CallHierarchyItem, right: &CallHierarchyItem) -> bool {
+        left.uri == right.uri && left.selection_range == right.selection_range
+    }
+
     /// Build a preferred insertion quick fix for one trusted missing-token diagnostic.
     ///
     /// Only parser diagnostics with the exact `compact-syntax` source and message
@@ -1335,6 +1477,7 @@ impl LanguageServer for CompactLanguageServer {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                call_hierarchy_provider: Some(CallHierarchyServerCapability::Simple(true)),
                 rename_provider: Some(OneOf::Right(RenameOptions {
                     prepare_provider: Some(true),
                     work_done_progress_options: Default::default(),
@@ -2911,6 +3054,202 @@ impl LanguageServer for CompactLanguageServer {
         }
     }
 
+    /// Prepare exactly one circuit item from a declaration or resolved direct call.
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> Result<Option<Vec<CallHierarchyItem>>> {
+        let uri = params
+            .text_document_position_params
+            .text_document
+            .uri
+            .to_string();
+        let position = params.text_document_position_params.position;
+        let cache_uri = Self::cache_uri(&uri);
+        let files = self.call_hierarchy_files();
+        let Some(file) = files.iter().find(|file| file.uri == cache_uri) else {
+            return Ok(None);
+        };
+
+        let mut candidates = Vec::new();
+        for circuit in &file.document.circuits {
+            if Self::position_in_range(position, circuit.selection_range) {
+                if let Some(item) = Self::call_hierarchy_item(file, circuit) {
+                    candidates.push(item);
+                }
+            }
+            for call in &circuit.calls {
+                if !Self::position_in_range(position, call.range) {
+                    continue;
+                }
+                if let Some((target_file, target)) =
+                    Self::resolve_call_target(&files, file, &call.name)
+                {
+                    if let Some(item) = Self::call_hierarchy_item(target_file, target) {
+                        candidates.push(item);
+                    }
+                }
+            }
+        }
+
+        candidates.sort_by(|left, right| {
+            left.uri
+                .as_str()
+                .cmp(right.uri.as_str())
+                .then(left.name.cmp(&right.name))
+                .then(
+                    left.selection_range
+                        .start
+                        .line
+                        .cmp(&right.selection_range.start.line),
+                )
+                .then(
+                    left.selection_range
+                        .start
+                        .character
+                        .cmp(&right.selection_range.start.character),
+                )
+        });
+        candidates.dedup_by(|left, right| Self::same_call_hierarchy_item(left, right));
+
+        if candidates.len() == 1 {
+            Ok(Some(candidates))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Group every unambiguous workspace call to the selected circuit by caller.
+    async fn incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        let files = self.call_hierarchy_files();
+        let Some((target_file, target)) = Self::circuit_for_item(&files, &params.item) else {
+            return Ok(None);
+        };
+        let Some(target_item) = Self::call_hierarchy_item(target_file, target) else {
+            return Ok(None);
+        };
+
+        let mut incoming = Vec::<CallHierarchyIncomingCall>::new();
+        for caller_file in &files {
+            for caller in &caller_file.document.circuits {
+                let Some(caller_item) = Self::call_hierarchy_item(caller_file, caller) else {
+                    continue;
+                };
+                let mut from_ranges = Vec::new();
+                for call in &caller.calls {
+                    let Some((called_file, called)) =
+                        Self::resolve_call_target(&files, caller_file, &call.name)
+                    else {
+                        continue;
+                    };
+                    let Some(called_item) = Self::call_hierarchy_item(called_file, called) else {
+                        continue;
+                    };
+                    if Self::same_call_hierarchy_item(&called_item, &target_item) {
+                        from_ranges.push(call.range);
+                    }
+                }
+                if !from_ranges.is_empty() {
+                    from_ranges.sort_by_key(|range| (range.start.line, range.start.character));
+                    incoming.push(CallHierarchyIncomingCall {
+                        from: caller_item,
+                        from_ranges,
+                    });
+                }
+            }
+        }
+
+        incoming.sort_by(|left, right| {
+            left.from
+                .uri
+                .as_str()
+                .cmp(right.from.uri.as_str())
+                .then(left.from.name.cmp(&right.from.name))
+                .then(
+                    left.from
+                        .selection_range
+                        .start
+                        .line
+                        .cmp(&right.from.selection_range.start.line),
+                )
+                .then(
+                    left.from
+                        .selection_range
+                        .start
+                        .character
+                        .cmp(&right.from.selection_range.start.character),
+                )
+        });
+
+        Ok(Some(incoming))
+    }
+
+    /// Group the selected circuit's unambiguous direct calls by target.
+    async fn outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        let files = self.call_hierarchy_files();
+        let Some((caller_file, caller)) = Self::circuit_for_item(&files, &params.item) else {
+            return Ok(None);
+        };
+
+        let mut outgoing = Vec::<CallHierarchyOutgoingCall>::new();
+        for call in &caller.calls {
+            let Some((target_file, target)) =
+                Self::resolve_call_target(&files, caller_file, &call.name)
+            else {
+                continue;
+            };
+            let Some(target_item) = Self::call_hierarchy_item(target_file, target) else {
+                continue;
+            };
+
+            if let Some(existing) = outgoing
+                .iter_mut()
+                .find(|existing| Self::same_call_hierarchy_item(&existing.to, &target_item))
+            {
+                existing.from_ranges.push(call.range);
+            } else {
+                outgoing.push(CallHierarchyOutgoingCall {
+                    to: target_item,
+                    from_ranges: vec![call.range],
+                });
+            }
+        }
+
+        for call in &mut outgoing {
+            call.from_ranges
+                .sort_by_key(|range| (range.start.line, range.start.character));
+        }
+        outgoing.sort_by(|left, right| {
+            left.to
+                .uri
+                .as_str()
+                .cmp(right.to.uri.as_str())
+                .then(left.to.name.cmp(&right.to.name))
+                .then(
+                    left.to
+                        .selection_range
+                        .start
+                        .line
+                        .cmp(&right.to.selection_range.start.line),
+                )
+                .then(
+                    left.to
+                        .selection_range
+                        .start
+                        .character
+                        .cmp(&right.to.selection_range.start.character),
+                )
+        });
+
+        Ok(Some(outgoing))
+    }
+
     async fn prepare_rename(
         &self,
         params: TextDocumentPositionParams,
@@ -3064,6 +3403,15 @@ mod workspace_tests {
         }
     }
 
+    fn call_hierarchy_file(path: &std::path::Path, source: &str) -> CallHierarchyFile {
+        std::fs::write(path, source).unwrap();
+        let mut parser = ParserEngine::new();
+        CallHierarchyFile {
+            uri: imports::path_to_file_uri(&path.canonicalize().unwrap()).unwrap(),
+            document: parser.call_hierarchy(source),
+        }
+    }
+
     #[test]
     fn indexes_multiple_and_nested_workspace_roots_without_duplicates() {
         let first = tempfile::tempdir().unwrap();
@@ -3205,6 +3553,41 @@ mod workspace_tests {
 
         assert!(CompactLanguageServer::position_in_range(range.start, range));
         assert!(!CompactLanguageServer::position_in_range(range.end, range));
+    }
+
+    #[test]
+    fn call_hierarchy_resolves_prefixes_and_rejects_ambiguous_imports() {
+        let temporary = tempfile::tempdir().unwrap();
+        let main_path = temporary.path().join("Main.compact");
+        let first_path = temporary.path().join("First.compact");
+        let second_path = temporary.path().join("Second.compact");
+        let declaration = "circuit shared(): Field { return 1; }";
+        let first = call_hierarchy_file(&first_path, declaration);
+        let second = call_hierarchy_file(&second_path, declaration);
+        let prefixed = call_hierarchy_file(
+            &main_path,
+            "import \"./First\" prefix First_;\nimport \"./Second\" prefix Second_;\ncircuit caller(): Field { return First_shared(); }",
+        );
+        let files = vec![prefixed, first, second];
+
+        let (target_file, target) =
+            CompactLanguageServer::resolve_call_target(&files, &files[0], "First_shared")
+                .expect("a unique prefix should resolve");
+        assert_eq!(target_file.uri, files[1].uri);
+        assert_eq!(target.name, "shared");
+
+        let ambiguous = call_hierarchy_file(
+            &main_path,
+            "import \"./First\";\nimport \"./Second\";\ncircuit caller(): Field { return shared(); }",
+        );
+        let first = call_hierarchy_file(&first_path, declaration);
+        let second = call_hierarchy_file(&second_path, declaration);
+        let files = vec![ambiguous, first, second];
+
+        assert!(
+            CompactLanguageServer::resolve_call_target(&files, &files[0], "shared").is_none(),
+            "two unprefixed imports must not become an arbitrary hierarchy edge"
+        );
     }
 }
 

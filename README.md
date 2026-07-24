@@ -26,6 +26,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Document Highlights** | Highlight declarations and references under the cursor |
 | **Rename** | Rename symbols across the workspace |
 | **Workspace Symbols** | Search declarations across open and indexed Compact files |
+| **Call Hierarchy** | Explore incoming and outgoing local or imported circuit calls |
 | **Signature Help** | Parameter hints while typing function calls |
 | **Inlay Hints** | Conservative parameter names for resolved circuit and ledger-method calls |
 | **Document Symbols** | Outline view (circuits, structs, enums, modules) |
