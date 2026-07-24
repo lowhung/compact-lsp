@@ -553,6 +553,7 @@ async fn run_multi_root_file_lifecycle() {
     let user_path = root_b.join("User.compact");
     let highlight_path = root_a.join("Highlight.compact");
     let hints_path = root_a.join("Hints.compact");
+    let linked_path = root_a.join("Linked.compact");
     let main_source = "import \"./Utility\" prefix Utils_;\nimport \"./New\";\ncircuit main(): Field { return Utils_hierarchy_target() + Utils_hierarchy_target(); }";
     let user_source = "import \"./Other\";\ncircuit user(): Field { return other(); }";
     let other_source = "circuit other(): Field { return 2; }";
@@ -579,6 +580,11 @@ circuit forward(left: Field): Field {
     local(left, 8);
     return left;
 }";
+    let linked_source = "\
+import \"./Utility\" prefix Utils_;
+circuit linked(): Field {
+    return Utils_utility() + Utils_utility();
+}";
     std::fs::write(
         root_a.join("Utility.compact"),
         "circuit hierarchy_target(): Field { return hierarchy_target(); }",
@@ -599,6 +605,7 @@ circuit forward(left: Field): Field {
     )
     .unwrap();
     std::fs::write(&hints_path, hints_source).unwrap();
+    std::fs::write(&linked_path, linked_source).unwrap();
 
     let root_a_uri = file_uri(&root_a);
     let root_b_uri = file_uri(&root_b);
@@ -608,6 +615,7 @@ circuit forward(left: Field): Field {
     let user_uri = file_uri(&user_path);
     let highlight_uri = file_uri(&highlight_path);
     let hints_uri = file_uri(&hints_path);
+    let linked_uri = file_uri(&linked_path);
     let mut lsp = LspHarness::start(&compiler).await;
 
     let initialize = lsp
@@ -655,6 +663,10 @@ circuit forward(left: Field): Field {
     );
     assert_eq!(initialize["capabilities"]["callHierarchyProvider"], true);
     assert_eq!(initialize["capabilities"]["selectionRangeProvider"], true);
+    assert_eq!(
+        initialize["capabilities"]["linkedEditingRangeProvider"],
+        true
+    );
 
     lsp.notify("initialized", json!({})).await;
     lsp.wait_until_ready().await;
@@ -724,6 +736,18 @@ circuit forward(left: Field): Field {
                 "languageId": "compact",
                 "version": 1,
                 "text": highlight_source
+            }
+        }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": linked_uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": linked_source
             }
         }),
     )
@@ -1016,6 +1040,47 @@ circuit forward(left: Field): Field {
         selection_ranges[2].get("parent").is_none(),
         "an invalid position should not invent parent syntax"
     );
+    let linked_ranges = lsp
+        .request(
+            "textDocument/linkedEditingRange",
+            json!({
+                "textDocument": { "uri": linked_uri },
+                "position": { "line": 0, "character": 27 }
+            }),
+        )
+        .await;
+    assert_eq!(
+        linked_ranges,
+        json!({
+            "ranges": [
+                {
+                    "start": { "line": 0, "character": 26 },
+                    "end": { "line": 0, "character": 32 }
+                },
+                {
+                    "start": { "line": 2, "character": 11 },
+                    "end": { "line": 2, "character": 17 }
+                },
+                {
+                    "start": { "line": 2, "character": 29 },
+                    "end": { "line": 2, "character": 35 }
+                }
+            ],
+            "wordPattern": "[A-Za-z_][A-Za-z0-9_]*"
+        })
+    );
+    assert_eq!(
+        lsp.request(
+            "textDocument/linkedEditingRange",
+            json!({
+                "textDocument": { "uri": linked_uri },
+                "position": { "line": 2, "character": 19 }
+            }),
+        )
+        .await,
+        Value::Null,
+        "call suffixes must not activate linked editing"
+    );
     let code_actions = lsp
         .request(
             "textDocument/codeAction",
@@ -1168,6 +1233,11 @@ circuit forward(left: Field): Field {
     lsp.notify(
         "textDocument/didClose",
         json!({ "textDocument": { "uri": hints_uri } }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": linked_uri } }),
     )
     .await;
     lsp.shutdown().await;
