@@ -450,6 +450,13 @@ async fn resident_memory_benchmark() {
 /// RSS. Only the representative 1,000-file shape receives request and document
 /// churn so the scaling scenarios remain quick.
 async fn run_rss_scenario(files: usize, symbols_per_file: usize, stress: bool) {
+    let platform = env::consts::OS;
+    let architecture = env::consts::ARCH;
+    let build_profile = if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    };
     let temporary = tempfile::tempdir().unwrap();
     let workspace = temporary.path().join("workspace");
     std::fs::create_dir(&workspace).unwrap();
@@ -506,7 +513,8 @@ async fn run_rss_scenario(files: usize, symbols_per_file: usize, stress: bool) {
 
     if !stress {
         eprintln!(
-            "compact-lsp RSS: files={files} symbols_per_file={symbols_per_file} \
+            "compact-lsp RSS: platform={platform} architecture={architecture} \
+             profile={build_profile} files={files} symbols_per_file={symbols_per_file} \
              startup={startup:?} workspace_symbol={workspace_symbol:?} \
              ready={ready_mib:.3} MiB peak={peak_mib:.3} MiB"
         );
@@ -621,7 +629,8 @@ async fn run_rss_scenario(files: usize, symbols_per_file: usize, stress: bool) {
     let completion_median = duration_percentile(&completion_latencies, 50);
     let completion_p95 = duration_percentile(&completion_latencies, 95);
     eprintln!(
-        "compact-lsp RSS: files={files} symbols_per_file={symbols_per_file} \
+        "compact-lsp RSS: platform={platform} architecture={architecture} \
+         profile={build_profile} files={files} symbols_per_file={symbols_per_file} \
          startup={startup:?} workspace_symbol={workspace_symbol:?} \
          ready={ready_mib:.3} MiB completions={completion_count} \
          completion_median={completion_median:?} completion_p95={completion_p95:?} \
