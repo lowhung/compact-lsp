@@ -278,6 +278,10 @@ async fn run_multi_root_file_lifecycle() {
         initialize["capabilities"]["workspace"]["workspaceFolders"]["supported"],
         true
     );
+    assert_eq!(
+        initialize["capabilities"]["codeActionProvider"]["codeActionKinds"],
+        json!(["quickfix"])
+    );
 
     lsp.notify("initialized", json!({})).await;
     lsp.wait_until_ready().await;
@@ -330,6 +334,37 @@ async fn run_multi_root_file_lifecycle() {
 
     assert!(lsp.completion_labels(&user_uri).await.contains("other"));
     assert!(!lsp.completion_labels(&main_uri).await.contains("fresh"));
+    let code_actions = lsp
+        .request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "range": {
+                    "start": { "line": 2, "character": 66 },
+                    "end": { "line": 2, "character": 66 }
+                },
+                "context": {
+                    "diagnostics": [{
+                        "range": {
+                            "start": { "line": 2, "character": 66 },
+                            "end": { "line": 2, "character": 66 }
+                        },
+                        "severity": 1,
+                        "source": "compact-syntax",
+                        "message": "Syntax error: missing ;"
+                    }],
+                    "only": ["quickfix"],
+                    "triggerKind": 1
+                }
+            }),
+        )
+        .await;
+    assert_eq!(code_actions[0]["title"], "Insert missing `;`");
+    assert_eq!(code_actions[0]["kind"], "quickfix");
+    assert_eq!(
+        code_actions[0]["edit"]["changes"][&main_uri][0]["newText"],
+        ";"
+    );
     let references = lsp
         .request(
             "textDocument/references",

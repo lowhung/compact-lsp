@@ -89,6 +89,74 @@ pub struct CompactLanguageServer {
 }
 
 impl CompactLanguageServer {
+    fn quick_fix_for_missing_token(
+        uri: &Uri,
+        diagnostic: &Diagnostic,
+    ) -> Option<CodeActionOrCommand> {
+        if diagnostic.source.as_deref() != Some("compact-syntax") {
+            return None;
+        }
+
+        let token = diagnostic
+            .message
+            .strip_prefix("Syntax error: missing ")
+            .and_then(Self::safe_missing_token)?;
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(
+            uri.clone(),
+            vec![TextEdit {
+                range: Range {
+                    start: diagnostic.range.start,
+                    end: diagnostic.range.start,
+                },
+                new_text: token.to_string(),
+            }],
+        );
+
+        Some(
+            CodeAction {
+                title: format!("Insert missing `{token}`"),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diagnostic.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(changes),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                is_preferred: Some(true),
+                ..Default::default()
+            }
+            .into(),
+        )
+    }
+
+    fn safe_missing_token(kind: &str) -> Option<&'static str> {
+        match kind {
+            ";" => Some(";"),
+            "," => Some(","),
+            ":" => Some(":"),
+            "(" => Some("("),
+            ")" => Some(")"),
+            "[" => Some("["),
+            "]" => Some("]"),
+            "{" => Some("{"),
+            "}" => Some("}"),
+            "<" => Some("<"),
+            ">" => Some(">"),
+            _ => None,
+        }
+    }
+
+    fn quick_fixes_requested(params: &CodeActionParams) -> bool {
+        match params.context.only.as_ref() {
+            None => true,
+            Some(kinds) => kinds
+                .iter()
+                .any(|kind| kind.as_str() == CodeActionKind::QUICKFIX.as_str()),
+        }
+    }
+
     /// Create a new language server instance.
     pub fn new(client: Client) -> Self {
         let diagnostic_engine = DiagnosticEngine::new();
@@ -752,6 +820,13 @@ impl LanguageServer for CompactLanguageServer {
                     resolve_provider: Some(false),
                     ..Default::default()
                 }),
+                code_action_provider: Some(CodeActionProviderCapability::Options(
+                    CodeActionOptions {
+                        code_action_kinds: Some(vec![CodeActionKind::QUICKFIX]),
+                        resolve_provider: Some(false),
+                        work_done_progress_options: Default::default(),
+                    },
+                )),
                 document_formatting_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 folding_range_provider: Some(FoldingRangeProviderCapability::Simple(true)),
@@ -1562,6 +1637,23 @@ impl LanguageServer for CompactLanguageServer {
         }
 
         Ok(Some(CompletionResponse::Array(items)))
+    }
+
+    async fn code_action(&self, params: CodeActionParams) -> Result<Option<CodeActionResponse>> {
+        if !Self::quick_fixes_requested(&params) {
+            return Ok(Some(Vec::new()));
+        }
+
+        let actions = params
+            .context
+            .diagnostics
+            .iter()
+            .filter_map(|diagnostic| {
+                Self::quick_fix_for_missing_token(&params.text_document.uri, diagnostic)
+            })
+            .collect();
+
+        Ok(Some(actions))
     }
 
     async fn formatting(&self, params: DocumentFormattingParams) -> Result<Option<Vec<TextEdit>>> {
@@ -2381,5 +2473,69 @@ mod workspace_tests {
         );
 
         assert_eq!(roots, vec![second.to_string(), third.to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod code_action_tests {
+    use super::*;
+
+    fn diagnostic(message: &str, source: &str) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 2,
+                    character: 12,
+                },
+                end: Position {
+                    line: 2,
+                    character: 12,
+                },
+            },
+            severity: Some(DiagnosticSeverity::ERROR),
+            source: Some(source.to_string()),
+            message: message.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn creates_preferred_quick_fix_for_missing_punctuation() {
+        let uri = Uri::from_str("file:///workspace/Main.compact").unwrap();
+        let diagnostic = diagnostic("Syntax error: missing ;", "compact-syntax");
+
+        let action = CompactLanguageServer::quick_fix_for_missing_token(&uri, &diagnostic)
+            .expect("missing punctuation should have a quick fix");
+        let CodeActionOrCommand::CodeAction(action) = action else {
+            panic!("expected a code action");
+        };
+
+        assert_eq!(action.title, "Insert missing `;`");
+        assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+        assert_eq!(action.is_preferred, Some(true));
+        assert_eq!(action.diagnostics, Some(vec![diagnostic.clone()]));
+        assert_eq!(
+            action.edit.unwrap().changes.unwrap().get(&uri).unwrap(),
+            &vec![TextEdit {
+                range: diagnostic.range,
+                new_text: ";".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn ignores_unsafe_or_unrelated_diagnostics() {
+        let uri = Uri::from_str("file:///workspace/Main.compact").unwrap();
+
+        assert!(CompactLanguageServer::quick_fix_for_missing_token(
+            &uri,
+            &diagnostic("Syntax error: missing identifier", "compact-syntax")
+        )
+        .is_none());
+        assert!(CompactLanguageServer::quick_fix_for_missing_token(
+            &uri,
+            &diagnostic("Syntax error: missing ;", "compactc")
+        )
+        .is_none());
     }
 }
