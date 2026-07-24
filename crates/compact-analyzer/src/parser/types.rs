@@ -40,6 +40,29 @@ pub struct SignatureInfo {
     pub active_parameter: u32,
 }
 
+/// One argument in a syntactically complete Compact call expression.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallArgument {
+    /// UTF-16 LSP position where the argument expression starts.
+    pub position: lsp_types::Position,
+    /// Source text for noise filtering, such as omitting `value:` before `value`.
+    pub text: String,
+}
+
+/// A syntactically complete function or ledger-method call.
+///
+/// `receiver` is `None` for calls such as `hash(value)` and contains the
+/// ledger receiver for calls such as `rounds.increment(value)`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CallSite {
+    /// Called circuit or method name.
+    pub function_name: String,
+    /// Ledger receiver for a member call.
+    pub receiver: Option<String>,
+    /// Arguments in source order.
+    pub arguments: Vec<CallArgument>,
+}
+
 /// Symbol kind for completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompletionSymbolKind {

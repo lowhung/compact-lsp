@@ -27,6 +27,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Rename** | Rename symbols across the workspace |
 | **Workspace Symbols** | Search declarations across open and indexed Compact files |
 | **Signature Help** | Parameter hints while typing function calls |
+| **Inlay Hints** | Conservative parameter names for resolved circuit and ledger-method calls |
 | **Document Symbols** | Outline view (circuits, structs, enums, modules) |
 | **Formatting** | Code formatting via the Compact CLI or `format-compact` |
 | **Folding Ranges** | Code folding for blocks and functions |
@@ -50,6 +51,33 @@ without restarting the language server.
 
 Open documents use incremental UTF-16 synchronization, so editors send only
 the changed ranges instead of retransmitting the full file after every edit.
+
+### Inlay hints
+
+Parameter hints are available for unambiguous local, imported, standard-library,
+and built-in ledger method calls. The server omits hints for incomplete calls,
+wrong argument counts, ambiguous declarations, and arguments whose identifier
+already matches the parameter name. Inferred type hints are not emitted until
+compiler-backed type inference is available.
+
+VS Code enables inlay hints by default. To make the preference explicit:
+
+```json
+{
+  "editor.inlayHints.enabled": "on"
+}
+```
+
+Zed currently requires inlay hints to be enabled:
+
+```json
+{
+  "inlay_hints": {
+    "enabled": true,
+    "show_parameter_hints": true
+  }
+}
+```
 
 ## Requirements
 

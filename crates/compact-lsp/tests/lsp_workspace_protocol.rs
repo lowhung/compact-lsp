@@ -244,6 +244,90 @@ async fn multi_root_index_tracks_compact_file_lifecycle() {
         .expect("workspace protocol test timed out");
 }
 
+#[tokio::test]
+async fn inlay_hints_load_imports_without_a_workspace_index() {
+    tokio::time::timeout(Duration::from_secs(20), run_cold_import_inlay_hints())
+        .await
+        .expect("cold import inlay-hint test timed out");
+}
+
+async fn run_cold_import_inlay_hints() {
+    let temporary = tempfile::tempdir().unwrap();
+    let compiler = temporary.path().join("compactc");
+    std::fs::write(&compiler, "#!/bin/sh\nexit 1\n").unwrap();
+    let mut permissions = std::fs::metadata(&compiler).unwrap().permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&compiler, permissions).unwrap();
+
+    let main_path = temporary.path().join("Main.compact");
+    let main_source = "\
+import \"./Utility\" prefix Utils_;
+circuit main(): Field { return Utils_scale(3, 4); }";
+    std::fs::write(&main_path, main_source).unwrap();
+    std::fs::write(
+        temporary.path().join("Utility.compact"),
+        "circuit scale(value: Field, factor: Field): Field { return value * factor; }",
+    )
+    .unwrap();
+    let main_uri = file_uri(&main_path);
+    let mut lsp = LspHarness::start(&compiler).await;
+
+    lsp.request(
+        "initialize",
+        json!({
+            "processId": null,
+            "capabilities": {},
+            "workspaceFolders": null,
+            "rootUri": null
+        }),
+    )
+    .await;
+    lsp.notify("initialized", json!({})).await;
+    lsp.wait_until_ready().await;
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": main_uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": main_source
+            }
+        }),
+    )
+    .await;
+
+    let hints = lsp
+        .request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 3, "character": 0 }
+                }
+            }),
+        )
+        .await;
+    assert_eq!(
+        hints
+            .as_array()
+            .expect("imported inlay hints")
+            .iter()
+            .filter_map(|hint| hint["label"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["value:", "factor:"],
+        "the first hint request should load a missing imported file on demand"
+    );
+
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": main_uri } }),
+    )
+    .await;
+    lsp.shutdown().await;
+}
+
 async fn run_multi_root_file_lifecycle() {
     let temporary = tempfile::tempdir().unwrap();
     let root_a = temporary.path().join("Root A");
@@ -262,6 +346,7 @@ async fn run_multi_root_file_lifecycle() {
     let other_path = root_b.join("Other.compact");
     let user_path = root_b.join("User.compact");
     let highlight_path = root_a.join("Highlight.compact");
+    let hints_path = root_a.join("Hints.compact");
     let main_source =
         "import \"./Utility\";\nimport \"./New\";\ncircuit main(): Field { return utility(); }";
     let user_source = "import \"./Other\";\ncircuit user(): Field { return other(); }";
@@ -270,6 +355,25 @@ async fn run_multi_root_file_lifecycle() {
 /*😀*/ circuit target(): Field { return 1; }
 circuit caller(): Field { return target(); }
 circuit unresolved_user(): Field { return missing(); }";
+    let hints_source = "\
+import \"./HintUtility\" prefix Hint_;
+ledger rounds: Counter;
+circuit local(left: Field, right: Field): Field { return left + right; }
+circuit duplicate(one: Field): Field { return one; }
+circuit duplicate(two: Field): Field { return two; }
+circuit hints(value: Field): Field {
+    local(1, 2);
+    Hint_utility(3, 4);
+    transientCommit(5, 6);
+    rounds.increment(7);
+    local(9);
+    duplicate(10);
+    return value;
+}
+circuit forward(left: Field): Field {
+    local(left, 8);
+    return left;
+}";
     std::fs::write(
         root_a.join("Utility.compact"),
         "circuit utility(): Field { return 1; }",
@@ -284,6 +388,12 @@ circuit unresolved_user(): Field { return missing(); }";
     )
     .unwrap();
     std::fs::write(&highlight_path, highlight_source).unwrap();
+    std::fs::write(
+        root_a.join("HintUtility.compact"),
+        "circuit utility(source: Field, factor: Field): Field { return source * factor; }",
+    )
+    .unwrap();
+    std::fs::write(&hints_path, hints_source).unwrap();
 
     let root_a_uri = file_uri(&root_a);
     let root_b_uri = file_uri(&root_b);
@@ -292,6 +402,7 @@ circuit unresolved_user(): Field { return missing(); }";
     let other_uri = file_uri(&other_path);
     let user_uri = file_uri(&user_path);
     let highlight_uri = file_uri(&highlight_path);
+    let hints_uri = file_uri(&hints_path);
     let mut lsp = LspHarness::start(&compiler).await;
 
     let initialize = lsp
@@ -333,6 +444,10 @@ circuit unresolved_user(): Field { return missing(); }";
         initialize["capabilities"]["documentHighlightProvider"],
         true
     );
+    assert_eq!(
+        initialize["capabilities"]["inlayHintProvider"]["resolveProvider"],
+        false
+    );
 
     lsp.notify("initialized", json!({})).await;
     lsp.wait_until_ready().await;
@@ -354,6 +469,18 @@ circuit unresolved_user(): Field { return missing(); }";
                 "languageId": "compact",
                 "version": 1,
                 "text": main_source
+            }
+        }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": {
+                "uri": hints_uri,
+                "languageId": "compact",
+                "version": 1,
+                "text": hints_source
             }
         }),
     )
@@ -465,6 +592,48 @@ circuit unresolved_user(): Field { return missing(); }";
         .await,
         Value::Null,
         "unresolved symbols should not produce document highlights"
+    );
+    let inlay_hints = lsp
+        .request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": hints_uri },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": 100, "character": 0 }
+                }
+            }),
+        )
+        .await;
+    let inlay_hints = inlay_hints.as_array().expect("inlay hint array");
+    assert_eq!(
+        inlay_hints
+            .iter()
+            .filter_map(|hint| hint["label"].as_str())
+            .collect::<Vec<_>>(),
+        vec!["left:", "right:", "source:", "factor:", "value:", "rand:", "amount:", "right:"],
+        "resolved calls should be hinted while wrong-arity and ambiguous calls are omitted"
+    );
+    assert!(inlay_hints
+        .iter()
+        .all(|hint| hint["kind"] == 2 && hint["paddingRight"] == true));
+    assert_eq!(
+        lsp.request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": hints_uri },
+                "range": {
+                    "start": { "line": 6, "character": 0 },
+                    "end": { "line": 7, "character": 0 }
+                }
+            }),
+        )
+        .await
+        .as_array()
+        .expect("range-filtered inlay hints")
+        .len(),
+        2,
+        "the server should only return hints inside the requested range"
     );
     let code_actions = lsp
         .request(
@@ -613,6 +782,11 @@ circuit unresolved_user(): Field { return missing(); }";
     lsp.notify(
         "textDocument/didClose",
         json!({ "textDocument": { "uri": highlight_uri } }),
+    )
+    .await;
+    lsp.notify(
+        "textDocument/didClose",
+        json!({ "textDocument": { "uri": hints_uri } }),
     )
     .await;
     lsp.shutdown().await;

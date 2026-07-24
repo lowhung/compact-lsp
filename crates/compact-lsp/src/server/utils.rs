@@ -233,34 +233,72 @@ pub fn count_commas_before_cursor(content: &str, line: u32, character: u32) -> u
     comma_count
 }
 
-/// Parse parameter strings from a detail string like "(a: Field, b: Field): ReturnType".
+/// Parse parameter labels from a signature detail string.
+///
+/// Commas nested inside generic types, arrays, tuples, or function types do
+/// not separate parameters. Malformed details return no labels instead of
+/// exposing partial signature data to editor features.
 pub fn parse_params_from_detail(detail: &str) -> Vec<String> {
-    // Extract content between first '(' and matching ')'
-    let start = match detail.find('(') {
-        Some(i) => i + 1,
-        None => return vec![],
+    let Some(start) = detail.find('(') else {
+        return Vec::new();
     };
-
-    let end = match detail.find(')') {
-        Some(i) => i,
-        None => return vec![],
-    };
-
-    if start >= end {
-        return vec![];
+    let mut paren_depth = 0_u32;
+    let mut end = None;
+    for (offset, character) in detail[start..].char_indices() {
+        match character {
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth = paren_depth.saturating_sub(1);
+                if paren_depth == 0 {
+                    end = Some(start + offset);
+                    break;
+                }
+            }
+            _ => {}
+        }
     }
-
-    let params_str = &detail[start..end];
+    let Some(end) = end else {
+        return Vec::new();
+    };
+    let params_str = &detail[start + 1..end];
     if params_str.trim().is_empty() {
-        return vec![];
+        return Vec::new();
     }
 
-    // Split by comma, handling potential nested types
-    params_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
+    let mut labels = Vec::new();
+    let mut label_start = 0;
+    let mut angle_depth = 0_u32;
+    let mut square_depth = 0_u32;
+    let mut nested_paren_depth = 0_u32;
+    for (offset, character) in params_str.char_indices() {
+        match character {
+            '<' => angle_depth += 1,
+            '>' => angle_depth = angle_depth.saturating_sub(1),
+            '[' => square_depth += 1,
+            ']' => square_depth = square_depth.saturating_sub(1),
+            '(' => nested_paren_depth += 1,
+            ')' => nested_paren_depth = nested_paren_depth.saturating_sub(1),
+            ',' if angle_depth == 0 && square_depth == 0 && nested_paren_depth == 0 => {
+                let label = params_str[label_start..offset].trim();
+                if label.is_empty() {
+                    return Vec::new();
+                }
+                labels.push(label.to_string());
+                label_start = offset + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if angle_depth != 0 || square_depth != 0 || nested_paren_depth != 0 {
+        return Vec::new();
+    }
+    let label = params_str[label_start..].trim();
+    if label.is_empty() {
+        return Vec::new();
+    }
+    labels.push(label.to_string());
+    labels
 }
 
 /// Detect dot-completion context by scanning backwards from cursor.
@@ -461,6 +499,25 @@ mod tests {
         let detail = "(): Void";
         let params = parse_params_from_detail(detail);
         assert!(params.is_empty());
+    }
+
+    #[test]
+    fn parse_params_preserves_nested_generic_commas() {
+        assert_eq!(
+            parse_params_from_detail(
+                "send(input: Map<Field, Vector<2, Uint<16>>>, recipient: Either<A, B>): []"
+            ),
+            vec![
+                "input: Map<Field, Vector<2, Uint<16>>>",
+                "recipient: Either<A, B>"
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_params_rejects_unbalanced_details() {
+        assert!(parse_params_from_detail("(input: Map<Field, Uint<16>>").is_empty());
+        assert!(parse_params_from_detail("(input: Field,): []").is_empty());
     }
 
     #[test]
