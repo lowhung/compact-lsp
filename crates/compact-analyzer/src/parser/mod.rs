@@ -54,6 +54,121 @@ impl ParserEngine {
         self.extract_symbols(root, source_bytes)
     }
 
+    /// Extract circuits, their direct calls, and imports from one syntax tree.
+    ///
+    /// Calls with parser errors are omitted, as are ledger and contract member
+    /// calls whose receiver type cannot yet be resolved authoritatively. This
+    /// fail-closed model prevents call hierarchy from presenting text matches as
+    /// semantic edges.
+    pub fn call_hierarchy(&mut self, source: &str) -> CallHierarchyDocument {
+        let Some(tree) = self.parse(source) else {
+            return CallHierarchyDocument::default();
+        };
+        let root = tree.root_node();
+        let source_bytes = source.as_bytes();
+        let mut circuits = Vec::new();
+        let mut imports = Vec::new();
+        self.collect_circuit_definitions(root, source_bytes, &mut circuits);
+        self.collect_imports(root, source_bytes, &mut imports);
+        circuits.sort_by_key(|circuit| {
+            (
+                circuit.selection_range.start.line,
+                circuit.selection_range.start.character,
+            )
+        });
+
+        CallHierarchyDocument { circuits, imports }
+    }
+
+    /// Recursively collect callable circuit declarations from modules and the
+    /// top-level document.
+    fn collect_circuit_definitions(
+        &self,
+        node: Node,
+        source: &[u8],
+        circuits: &mut Vec<CircuitDefinition>,
+    ) {
+        if matches!(node.kind(), "cdefn" | "edecl") && !node.has_error() && !node.is_missing() {
+            if let Some(name_node) = self.function_name_node(node) {
+                let mut calls = Vec::new();
+                self.collect_direct_circuit_calls(node, source, &mut calls);
+                calls.sort_by_key(|call| (call.range.start.line, call.range.start.character));
+                circuits.push(CircuitDefinition {
+                    name: self.node_text(name_node, source),
+                    range: self.node_range(node, source),
+                    selection_range: self.node_range(name_node, source),
+                    calls,
+                });
+            }
+            return;
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_circuit_definitions(child, source, circuits);
+        }
+    }
+
+    /// Collect complete direct calls below one circuit declaration.
+    ///
+    /// `member_access_expr` nodes are deliberately ignored until the analyzer can
+    /// resolve receiver types rather than guessing from method names.
+    fn collect_direct_circuit_calls(
+        &self,
+        node: Node,
+        source: &[u8],
+        calls: &mut Vec<CircuitCall>,
+    ) {
+        if node.kind() == "function_call_term"
+            && !node.has_error()
+            && !node.is_missing()
+            && node
+                .parent()
+                .map_or(true, |parent| parent.kind() != "member_access_expr")
+        {
+            if let Some(name_node) = self.call_function_name_node(node) {
+                calls.push(CircuitCall {
+                    name: self.node_text(name_node, source),
+                    range: self.node_range(name_node, source),
+                });
+            }
+        }
+
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            self.collect_direct_circuit_calls(child, source, calls);
+        }
+    }
+
+    /// Return the syntax node that spans a circuit declaration name.
+    fn function_name_node<'tree>(&self, node: Node<'tree>) -> Option<Node<'tree>> {
+        let mut cursor = node.walk();
+        let name = node
+            .children(&mut cursor)
+            .find(|child| child.kind() == "function_name");
+        name
+    }
+
+    /// Return the identifier node that spans a direct call target.
+    fn call_function_name_node<'tree>(&self, node: Node<'tree>) -> Option<Node<'tree>> {
+        if node.kind() != "function_call_term" {
+            return None;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind() != "fun" {
+                continue;
+            }
+            let mut inner_cursor = child.walk();
+            for inner in child.children(&mut inner_cursor) {
+                if inner.kind() == "id" {
+                    return Some(inner);
+                }
+            }
+        }
+        None
+    }
+
     /// Recursively extract symbols from a node.
     fn extract_symbols(&self, node: Node, source: &[u8]) -> Vec<DocumentSymbol> {
         let mut symbols = Vec::new();
@@ -2016,6 +2131,42 @@ circuit run(): Field {
     }
 
     #[test]
+    fn call_hierarchy_collects_direct_nested_and_prefixed_calls() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+import \"./Utility\" prefix Utils_;
+circuit leaf(value: Field): Field { return value; }
+ledger rounds: Counter;
+circuit caller(value: Field): Field {
+    rounds.increment(1);
+    /*😀*/ return Utils_scale(leaf(leaf(value)), 2);
+}";
+
+        let hierarchy = parser.call_hierarchy(source);
+
+        assert_eq!(hierarchy.imports.len(), 1);
+        assert_eq!(hierarchy.circuits.len(), 2);
+        assert_eq!(hierarchy.circuits[0].name, "leaf");
+        assert!(hierarchy.circuits[0].calls.is_empty());
+        assert_eq!(
+            hierarchy.circuits[1]
+                .calls
+                .iter()
+                .map(|call| call.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Utils_scale", "leaf", "leaf"]
+        );
+        assert_eq!(
+            hierarchy.circuits[1].calls[0].range.start,
+            Position {
+                line: 5,
+                character: 18
+            },
+            "call ranges must use UTF-16 columns rather than UTF-8 bytes"
+        );
+    }
+
+    #[test]
     fn call_sites_skip_incomplete_calls() {
         let mut parser = ParserEngine::new();
         let source = "\
@@ -2025,6 +2176,21 @@ circuit run(): Field {
 }";
 
         assert!(parser.call_sites(source).is_empty());
+    }
+
+    #[test]
+    fn call_hierarchy_skips_incomplete_calls() {
+        let mut parser = ParserEngine::new();
+        let source = "\
+circuit leaf(value: Field): Field { return value; }
+circuit caller(): Field {
+    return leaf(
+}";
+
+        let hierarchy = parser.call_hierarchy(source);
+
+        assert_eq!(hierarchy.circuits.len(), 1);
+        assert_eq!(hierarchy.circuits[0].name, "leaf");
     }
 
     #[test]

@@ -20,6 +20,40 @@ pub struct DefinitionLocation {
     pub selection_range: Range,
 }
 
+/// One direct circuit call made from a Compact circuit body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircuitCall {
+    /// Source-level call name, including an import prefix when one is present.
+    pub name: String,
+    /// UTF-16 range of the called name, excluding arguments.
+    pub range: Range,
+}
+
+/// A circuit declaration and the direct calls contained in its body.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CircuitDefinition {
+    /// Unprefixed declaration name.
+    pub name: String,
+    /// Range of the complete circuit declaration.
+    pub range: Range,
+    /// Range of the declaration name.
+    pub selection_range: Range,
+    /// Complete, non-member calls in source order.
+    pub calls: Vec<CircuitCall>,
+}
+
+/// Parser output needed to build a workspace call hierarchy.
+///
+/// Circuits and imports come from the same tree so a hierarchy request never
+/// resolves calls against import data from a different parse snapshot.
+#[derive(Debug, Clone, Default)]
+pub struct CallHierarchyDocument {
+    /// Circuit declarations and their direct calls.
+    pub circuits: Vec<CircuitDefinition>,
+    /// File imports used to resolve prefixed call names.
+    pub imports: Vec<ImportInfo>,
+}
+
 /// Parameter information for signature help.
 #[derive(Debug, Clone)]
 pub struct ParameterInfo {

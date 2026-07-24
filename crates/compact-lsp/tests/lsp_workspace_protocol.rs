@@ -553,8 +553,7 @@ async fn run_multi_root_file_lifecycle() {
     let user_path = root_b.join("User.compact");
     let highlight_path = root_a.join("Highlight.compact");
     let hints_path = root_a.join("Hints.compact");
-    let main_source =
-        "import \"./Utility\";\nimport \"./New\";\ncircuit main(): Field { return utility(); }";
+    let main_source = "import \"./Utility\" prefix Utils_;\nimport \"./New\";\ncircuit main(): Field { return Utils_hierarchy_target() + Utils_hierarchy_target(); }";
     let user_source = "import \"./Other\";\ncircuit user(): Field { return other(); }";
     let other_source = "circuit other(): Field { return 2; }";
     let highlight_source = "\
@@ -582,7 +581,7 @@ circuit forward(left: Field): Field {
 }";
     std::fs::write(
         root_a.join("Utility.compact"),
-        "circuit utility(): Field { return 1; }",
+        "circuit hierarchy_target(): Field { return hierarchy_target(); }",
     )
     .unwrap();
     std::fs::write(&main_path, main_source).unwrap();
@@ -654,6 +653,7 @@ circuit forward(left: Field): Field {
         initialize["capabilities"]["inlayHintProvider"]["resolveProvider"],
         false
     );
+    assert_eq!(initialize["capabilities"]["callHierarchyProvider"], true);
 
     lsp.notify("initialized", json!({})).await;
     lsp.wait_until_ready().await;
@@ -730,6 +730,131 @@ circuit forward(left: Field): Field {
 
     assert!(lsp.completion_labels(&user_uri).await.contains("other"));
     assert!(!lsp.completion_labels(&main_uri).await.contains("fresh"));
+
+    let main_hierarchy = lsp
+        .request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 2, "character": 9 }
+            }),
+        )
+        .await;
+    let main_item = main_hierarchy[0].clone();
+    assert_eq!(main_item["name"], "main");
+
+    let outgoing = lsp
+        .request("callHierarchy/outgoingCalls", json!({ "item": main_item }))
+        .await;
+    assert_eq!(outgoing.as_array().expect("outgoing calls").len(), 1);
+    assert_eq!(outgoing[0]["to"]["name"], "hierarchy_target");
+    assert_eq!(
+        outgoing[0]["fromRanges"]
+            .as_array()
+            .expect("duplicate call ranges")
+            .len(),
+        2
+    );
+    let utility_item = outgoing[0]["to"].clone();
+
+    let prepared_call = lsp
+        .request(
+            "textDocument/prepareCallHierarchy",
+            json!({
+                "textDocument": { "uri": main_uri },
+                "position": { "line": 2, "character": 34 }
+            }),
+        )
+        .await;
+    assert_eq!(prepared_call[0]["name"], "hierarchy_target");
+
+    let incoming = lsp
+        .request(
+            "callHierarchy/incomingCalls",
+            json!({ "item": utility_item }),
+        )
+        .await;
+    let incoming = incoming.as_array().expect("incoming calls");
+    assert_eq!(
+        incoming.len(),
+        2,
+        "main and hierarchy_target should call hierarchy_target"
+    );
+    let from_main = incoming
+        .iter()
+        .find(|call| call["from"]["name"] == "main")
+        .expect("main incoming call");
+    assert_eq!(
+        from_main["fromRanges"]
+            .as_array()
+            .expect("main call ranges")
+            .len(),
+        2
+    );
+    let from_utility = incoming
+        .iter()
+        .find(|call| call["from"]["name"] == "hierarchy_target")
+        .expect("recursive incoming call");
+    assert_eq!(
+        from_utility["fromRanges"]
+            .as_array()
+            .expect("recursive call ranges")
+            .len(),
+        1
+    );
+
+    let recursive = lsp
+        .request(
+            "callHierarchy/outgoingCalls",
+            json!({ "item": from_utility["from"] }),
+        )
+        .await;
+    assert_eq!(recursive[0]["to"]["name"], "hierarchy_target");
+    assert_eq!(
+        recursive[0]["fromRanges"]
+            .as_array()
+            .expect("recursive outgoing range")
+            .len(),
+        1
+    );
+
+    std::fs::write(
+        root_a.join("Utility.compact"),
+        "circuit replacement(): Field { return 1; }",
+    )
+    .unwrap();
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": file_uri(&root_a.join("Utility.compact")), "type": 2 }] }),
+    )
+    .await;
+    lsp.wait_for_workspace_symbol("hierarchy_target", "hierarchy_target", false)
+        .await;
+    assert_eq!(
+        lsp.request("callHierarchy/outgoingCalls", json!({ "item": main_item }),)
+            .await,
+        json!([]),
+        "watched-file changes should invalidate hierarchy targets"
+    );
+
+    std::fs::write(
+        root_a.join("Utility.compact"),
+        "circuit hierarchy_target(): Field { return hierarchy_target(); }",
+    )
+    .unwrap();
+    lsp.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": file_uri(&root_a.join("Utility.compact")), "type": 2 }] }),
+    )
+    .await;
+    lsp.wait_for_workspace_symbol("hierarchy_target", "hierarchy_target", true)
+        .await;
+    assert_eq!(
+        lsp.request("callHierarchy/outgoingCalls", json!({ "item": main_item }),)
+            .await[0]["to"]["name"],
+        "hierarchy_target"
+    );
+
     let initial_symbols = lsp.workspace_symbols("").await;
     let initial_names: Vec<_> = initial_symbols
         .iter()
