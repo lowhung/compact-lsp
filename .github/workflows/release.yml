@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch: {}
 
 env:
   CARGO_TERM_COLOR: always
@@ -25,13 +26,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Verify tag matches package version
+      - name: Verify release version
         shell: bash
         run: |
           package_version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "compact-lsp") | .version')"
           extension_version="$(jq -r '.version' editors/vscode/package.json)"
-          test "v${package_version}" = "${GITHUB_REF_NAME}"
           test "${extension_version}" = "${package_version}"
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            test "v${package_version}" = "${GITHUB_REF_NAME}"
+          fi
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -118,6 +121,7 @@ jobs:
           Compress-Archive -Path package/* -DestinationPath "${{ matrix.artifact }}.${{ matrix.archive }}"
 
       - name: Attest release archive
+        if: github.event_name == 'push'
         uses: actions/attest@v4
         with:
           create-storage-record: false
@@ -164,6 +168,7 @@ jobs:
         run: npm run package -- --out "compact-lsp-vscode-${GITHUB_REF_NAME}.vsix"
 
       - name: Attest VSIX
+        if: github.event_name == 'push'
         uses: actions/attest@v4
         with:
           create-storage-record: false
@@ -177,7 +182,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: Create release
+    name: Assemble release
     needs: [build, vscode]
     runs-on: ubuntu-latest
     permissions:
@@ -201,13 +206,23 @@ jobs:
           test -s SHA256SUMS
 
       - name: Attest checksum manifest
+        if: github.event_name == 'push'
         uses: actions/attest@v4
         with:
           create-storage-record: false
           subject-path: artifacts/SHA256SUMS
 
       - name: Create GitHub release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*
           generate_release_notes: true
+
+      - name: Upload dry-run bundle
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: compact-lsp-release-dry-run-${{ github.sha }}
+          path: artifacts/*
+          if-no-files-found: error
