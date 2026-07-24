@@ -1208,6 +1208,33 @@ impl ParserEngine {
         symbols
     }
 
+    /// Build the declaration and import index from one syntax tree.
+    ///
+    /// Workspace indexing and ordinary completion need both collections. Keeping
+    /// this operation in the analyzer prevents callers from accidentally parsing
+    /// each document twice. If tree-sitter cannot produce a tree, both collections
+    /// are empty so consumers can safely replace any stale cache entry.
+    pub fn index_source(&mut self, source: &str) -> SourceIndex {
+        let tree = match self.parse(source) {
+            Some(tree) => tree,
+            None => {
+                return SourceIndex {
+                    symbols: Vec::new(),
+                    imports: Vec::new(),
+                };
+            }
+        };
+
+        let root = tree.root_node();
+        let source_bytes = source.as_bytes();
+        let mut symbols = Vec::new();
+        let mut imports = Vec::new();
+        self.collect_completion_symbols(root, source_bytes, &mut symbols);
+        self.collect_imports(root, source_bytes, &mut imports);
+
+        SourceIndex { symbols, imports }
+    }
+
     /// Recursively collect completion symbols from the AST.
     fn collect_completion_symbols(
         &self,
@@ -2290,6 +2317,25 @@ circuit main(): Field {
         let no_prefix = no_prefix.unwrap();
         assert!(no_prefix.is_file, "Should be a file import");
         assert!(no_prefix.prefix.is_none(), "Should have no prefix");
+    }
+
+    #[test]
+    fn source_index_collects_symbols_and_imports_together() {
+        let mut parser = ParserEngine::new();
+        let source = r#"
+import "../utils/Utils" prefix Utils_;
+
+circuit add(a: Field, b: Field): Field {
+    return a + b;
+}
+"#;
+
+        let index = parser.index_source(source);
+
+        assert!(index.symbols.iter().any(|symbol| symbol.name == "add"));
+        assert_eq!(index.imports.len(), 1);
+        assert_eq!(index.imports[0].path, "../utils/Utils");
+        assert_eq!(index.imports[0].prefix.as_deref(), Some("Utils_"));
     }
 
     #[test]

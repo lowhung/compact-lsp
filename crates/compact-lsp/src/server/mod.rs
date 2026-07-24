@@ -35,10 +35,15 @@ use tokio::sync::Mutex as AsyncMutex;
 use tower_lsp::jsonrpc::Result;
 use tower_lsp::{Client, LanguageServer};
 
+/// One disk-backed file prepared off the async runtime before cache replacement.
 struct IndexedWorkspaceFile {
+    /// Canonical file URI used as the key in every workspace cache.
     uri: String,
+    /// Source retained for cross-file hover, references, and rename.
     content: String,
+    /// Declarations retained for completion and workspace-symbol queries.
     symbols: Vec<CompletionSymbol>,
+    /// Imports used to rebuild reverse dependency edges after the scan.
     imports: Vec<ImportInfo>,
 }
 
@@ -512,6 +517,11 @@ impl CompactLanguageServer {
         }
     }
 
+    /// Read and parse every Compact file below the supplied workspace roots.
+    ///
+    /// This synchronous function runs inside `spawn_blocking`. Canonical URI
+    /// deduplication prevents nested or overlapping workspace roots from indexing
+    /// a file twice, and unreadable files are skipped without failing the scan.
     fn index_workspace_roots(roots: Vec<String>) -> Vec<IndexedWorkspaceFile> {
         let mut parser = ParserEngine::new();
         let mut indexed = Vec::new();
@@ -561,13 +571,12 @@ impl CompactLanguageServer {
                     }
                 };
 
-                let symbols = parser.get_completion_symbols(&content);
-                let file_imports = parser.get_imports(&content);
+                let source_index = parser.index_source(&content);
                 indexed.push(IndexedWorkspaceFile {
                     uri,
                     content,
-                    symbols,
-                    imports: file_imports,
+                    symbols: source_index.symbols,
+                    imports: source_index.imports,
                 });
             }
         }
@@ -575,6 +584,11 @@ impl CompactLanguageServer {
         indexed
     }
 
+    /// Replace the logical workspace snapshot after a completed scan.
+    ///
+    /// Open editor buffers are reapplied last because their unsaved text is newer
+    /// than the corresponding disk snapshot. The enclosing scan lock prevents two
+    /// full replacements from interleaving.
     fn replace_workspace_index(&self, indexed_files: Vec<IndexedWorkspaceFile>) {
         self.source_cache.clear();
         self.symbol_cache.clear();
@@ -605,8 +619,7 @@ impl CompactLanguageServer {
             .map(|entry| (entry.key().clone(), entry.content.to_string()))
             .collect();
         for (uri, content) in open_documents {
-            self.update_symbol_cache(&uri, &content);
-            self.update_reverse_dependencies(&uri, &content);
+            self.update_file_cache(&uri, &content);
         }
 
         let dependency_count = self
@@ -622,6 +635,10 @@ impl CompactLanguageServer {
         );
     }
 
+    /// Return the canonical cache key for a file URI when its path is resolvable.
+    ///
+    /// New files may not exist yet, so the parent directory is canonicalized as a
+    /// fallback before the lexical normalization used by import resolution.
     fn normalized_file_uri(uri: &str) -> Option<String> {
         let path = imports::file_uri_to_path(uri)?;
         let normalized = path.canonicalize().ok().or_else(|| {
@@ -632,10 +649,12 @@ impl CompactLanguageServer {
         imports::path_to_file_uri(&normalized)
     }
 
+    /// Normalize a file URI for cache access, preserving non-file or unresolved URIs.
     fn cache_uri(uri: &str) -> String {
         Self::normalized_file_uri(uri).unwrap_or_else(|| uri.to_string())
     }
 
+    /// Check whether a URI names a Compact file under any configured workspace root.
     fn workspace_contains_uri(&self, uri: &str) -> bool {
         let Some(path) =
             Self::normalized_file_uri(uri).and_then(|uri| imports::file_uri_to_path(&uri))
@@ -658,6 +677,10 @@ impl CompactLanguageServer {
         })
     }
 
+    /// Refresh one workspace file from its open buffer or, otherwise, from disk.
+    ///
+    /// Returns the normalized cache URI only when the file remains readable and in
+    /// scope. Callers use `None` to remove stale entries after deletes or renames.
     async fn refresh_workspace_file(&self, uri: &str) -> Option<String> {
         if !self.workspace_contains_uri(uri) {
             return None;
@@ -677,11 +700,11 @@ impl CompactLanguageServer {
             }
         };
 
-        self.update_symbol_cache(&cache_uri, &content);
-        self.update_reverse_dependencies(&cache_uri, &content);
+        self.update_file_cache(&cache_uri, &content);
         Some(cache_uri)
     }
 
+    /// Remove all cached state for a file and return its former dependents.
     fn remove_workspace_file(&self, uri: &str) -> Vec<String> {
         let uri = Self::cache_uri(uri);
         self.source_cache.remove(&uri);
@@ -693,21 +716,28 @@ impl CompactLanguageServer {
             .unwrap_or_default()
     }
 
-    /// Update the symbol and source cache for a specific file.
-    fn update_symbol_cache(&self, uri: &str, content: &str) {
+    /// Rebuild all parser-derived cache entries for one source snapshot.
+    ///
+    /// Symbols and imports come from the same syntax tree, keeping the caches
+    /// internally consistent while avoiding duplicate parsing. Empty symbol sets
+    /// remove old declarations, and dependency edges are always replaced.
+    fn update_file_cache(&self, uri: &str, content: &str) {
         let uri = Self::cache_uri(uri);
-        let symbols = {
+        let source_index = {
             let mut parser = self.parser_engine.lock().unwrap();
-            parser.get_completion_symbols(content)
+            parser.index_source(content)
         };
 
         self.source_cache.insert(uri.clone(), content.to_string());
 
-        if symbols.is_empty() {
+        if source_index.symbols.is_empty() {
             self.symbol_cache.remove(&uri);
         } else {
-            self.symbol_cache.insert(uri, symbols);
+            self.symbol_cache.insert(uri.clone(), source_index.symbols);
         }
+
+        self.remove_reverse_dependencies(&uri);
+        self.add_reverse_dependencies(&uri, &source_index.imports);
     }
 
     /// Build a deterministic `workspace/symbol` response from a symbol-cache snapshot.
@@ -970,19 +1000,7 @@ impl CompactLanguageServer {
         key(position) >= key(range.start) && key(position) < key(range.end)
     }
 
-    /// Update reverse dependencies for a file based on its imports.
-    fn update_reverse_dependencies(&self, uri: &str, content: &str) {
-        let uri = Self::cache_uri(uri);
-        self.remove_reverse_dependencies(&uri);
-
-        let file_imports = {
-            let mut parser = self.parser_engine.lock().unwrap();
-            parser.get_imports(content)
-        };
-
-        self.add_reverse_dependencies(&uri, &file_imports);
-    }
-
+    /// Add reverse edges from imported files to the file that depends on them.
     fn add_reverse_dependencies(&self, uri: &str, file_imports: &[ImportInfo]) {
         for import in file_imports {
             if import.is_file {
@@ -1096,7 +1114,7 @@ impl CompactLanguageServer {
                 continue;
             };
             match tokio::fs::read_to_string(path).await {
-                Ok(content) => self.update_symbol_cache(&imported_uri, &content),
+                Ok(content) => self.update_file_cache(&imported_uri, &content),
                 Err(error) => tracing::debug!(
                     "Could not load imported symbols for inlay hints from {}: {}",
                     imported_uri,
@@ -1494,8 +1512,7 @@ impl LanguageServer for CompactLanguageServer {
             },
         );
 
-        self.update_symbol_cache(&uri, &params.text_document.text);
-        self.update_reverse_dependencies(&uri, &params.text_document.text);
+        self.update_file_cache(&uri, &params.text_document.text);
         self.publish_diagnostics(params.text_document.uri).await;
     }
 
@@ -1536,8 +1553,7 @@ impl LanguageServer for CompactLanguageServer {
             Some(doc) => doc.content.to_string(),
             None => return,
         };
-        self.update_symbol_cache(&uri_string, &content);
-        self.update_reverse_dependencies(&uri_string, &content);
+        self.update_file_cache(&uri_string, &content);
         self.schedule_semantic_diagnostics(uri, content, version, Duration::from_millis(500))
             .await;
     }
@@ -1549,8 +1565,7 @@ impl LanguageServer for CompactLanguageServer {
 
         if let Some(doc) = self.documents.get(&uri_str) {
             let content = doc.content.to_string();
-            self.update_symbol_cache(&uri_str, &content);
-            self.update_reverse_dependencies(&uri_str, &content);
+            self.update_file_cache(&uri_str, &content);
         }
 
         self.publish_diagnostics(uri).await;
@@ -1663,12 +1678,12 @@ impl LanguageServer for CompactLanguageServer {
         let file_imports = if let Some(doc) = self.documents.get(&uri) {
             let content = doc.content.to_string();
 
-            let symbols = {
+            let source_index = {
                 let mut parser = self.parser_engine.lock().unwrap();
-                parser.get_completion_symbols(&content)
+                parser.index_source(&content)
             };
 
-            for sym in symbols {
+            for sym in source_index.symbols {
                 items.push(CompletionItem {
                     label: sym.name.clone(),
                     kind: Some(symbol_to_lsp_kind(sym.kind)),
@@ -1678,11 +1693,7 @@ impl LanguageServer for CompactLanguageServer {
                 });
             }
 
-            let file_imports = {
-                let mut parser = self.parser_engine.lock().unwrap();
-                parser.get_imports(&content)
-            };
-            file_imports
+            source_index.imports
         } else {
             vec![]
         };

@@ -112,6 +112,19 @@ pub struct ImportInfo {
     pub prefix: Option<String>,
 }
 
+/// Declarations and imports extracted from one parsed source tree.
+///
+/// Features that need both collections should use
+/// [`ParserEngine::index_source`](crate::parser::ParserEngine::index_source)
+/// instead of parsing the same document separately for completions and imports.
+#[derive(Debug, Clone)]
+pub struct SourceIndex {
+    /// Declarations used by completion, navigation, and workspace-symbol features.
+    pub symbols: Vec<CompletionSymbol>,
+    /// Imports used to resolve prefixed symbols and maintain dependency edges.
+    pub imports: Vec<ImportInfo>,
+}
+
 /// A syntax error detected by tree-sitter parsing.
 #[derive(Debug, Clone)]
 pub struct SyntaxError {

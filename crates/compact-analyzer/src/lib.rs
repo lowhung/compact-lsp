@@ -20,6 +20,7 @@ pub use formatter::FormatterEngine;
 pub use parser::{
     CallArgument, CallSite, CompletionSymbol, CompletionSymbolKind, DefinitionLocation, HoverInfo,
     ImportInfo, MemberAccessContext, ParameterInfo, ParserEngine, ReferenceLocation, SemanticToken,
-    SemanticTokenModifier, SemanticTokenType, SignatureInfo, SymbolLocation, SyntaxError,
+    SemanticTokenModifier, SemanticTokenType, SignatureInfo, SourceIndex, SymbolLocation,
+    SyntaxError,
 };
 pub use toolchain::{CompilerCommand, FormatterCommand, ToolSource};
