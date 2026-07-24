@@ -19,10 +19,19 @@ pub struct Document {
     pub version: i32,
 }
 
+/// Why an incremental LSP change batch could not be applied safely.
+///
+/// Callers should keep the previous document snapshot when this error is
+/// returned. [`Document::apply_changes_if_newer`] validates and applies changes
+/// to a clone before replacing the tracked rope, so no variant represents a
+/// partially applied batch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DocumentChangeError {
+    /// The client supplied a newer document version without any content changes.
     EmptyChanges,
+    /// A UTF-16 LSP position was outside the document or split a surrogate pair.
     InvalidPosition(Position),
+    /// A change range ended before it started after UTF-16 conversion.
     ReversedRange { start: Position, end: Position },
 }
 
@@ -48,6 +57,9 @@ impl std::error::Error for DocumentChangeError {}
 
 impl Document {
     /// Replace the full document content when the client version is newer.
+    ///
+    /// Returns `true` when the replacement was accepted. Equal or older
+    /// versions are ignored and return `false`, preserving the current content.
     pub fn replace_if_newer(&mut self, version: i32, content: &str) -> bool {
         if version <= self.version {
             return false;
@@ -62,7 +74,12 @@ impl Document {
     ///
     /// Positions use the negotiated UTF-16 encoding. The batch is applied to a
     /// clone and committed atomically so an invalid range cannot partially
-    /// mutate the tracked document.
+    /// mutate the tracked document. Changes are interpreted in array order, so
+    /// every range addresses the result of the preceding change.
+    ///
+    /// Returns `Ok(true)` after applying a newer version and `Ok(false)` for an
+    /// equal or stale version. A newer but malformed batch returns
+    /// `DocumentChangeError` and leaves both content and version unchanged.
     pub fn apply_changes_if_newer(
         &mut self,
         version: i32,
@@ -99,6 +116,11 @@ impl Document {
         Ok(true)
     }
 
+    /// Convert an LSP UTF-16 position into Ropey's Unicode-scalar index.
+    ///
+    /// Line terminators are not addressable as line content. Positions beyond
+    /// the logical line, outside the document, or halfway through a non-BMP
+    /// character return [`DocumentChangeError::InvalidPosition`].
     fn position_to_char(rope: &Rope, position: Position) -> Result<usize, DocumentChangeError> {
         let line_index = position.line as usize;
         if line_index >= rope.len_lines() {
