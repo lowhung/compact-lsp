@@ -28,6 +28,7 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 | **Document Symbols** | Outline view (circuits, structs, enums, modules) |
 | **Formatting** | Code formatting via the Compact CLI or `format-compact` |
 | **Folding Ranges** | Code folding for blocks and functions |
+| **Code Actions** | Safe quick fixes for Compact syntax diagnostics |
 | **Cross-file Errors** | Errors propagate to dependent files on save |
 
 ### Cross-Project Support
@@ -44,12 +45,6 @@ The server indexes workspace files without blocking editor requests and
 registers a `**/*.compact` file watcher when the client supports it. Creating,
 changing, or deleting an imported file updates completion and navigation
 without restarting the language server.
-
-### Missing Things
-
-| Feature | Status |
-|---------|--------|
-| Code Actions | TODO |
 
 ## Requirements
 
