@@ -729,23 +729,25 @@ impl ParserEngine {
         if let Some(parent) = node.parent() {
             let parent_kind = parent.kind();
             match parent_kind {
-                "cdefn" | "edecl" | "wdecl" => {
-                    if self.get_field_text(parent, "id", source_bytes).as_deref() == Some(&text) {
-                        // We're on the definition itself
-                        return Some(DefinitionLocation {
-                            range: self.node_range(parent),
-                            selection_range: self.node_range(node),
-                        });
-                    }
+                "cdefn" | "edecl" | "wdecl"
+                    if self.get_field_text(parent, "id", source_bytes).as_deref()
+                        == Some(&text) =>
+                {
+                    // We're on the definition itself
+                    return Some(DefinitionLocation {
+                        range: self.node_range(parent),
+                        selection_range: self.node_range(node),
+                    });
                 }
-                "ldecl" | "struct" | "enumdef" | "mdefn" | "ecdecl" => {
-                    if self.get_field_text(parent, "name", source_bytes).as_deref() == Some(&text) {
-                        // We're on the definition itself
-                        return Some(DefinitionLocation {
-                            range: self.node_range(parent),
-                            selection_range: self.node_range(node),
-                        });
-                    }
+                "ldecl" | "struct" | "enumdef" | "mdefn" | "ecdecl"
+                    if self.get_field_text(parent, "name", source_bytes).as_deref()
+                        == Some(&text) =>
+                {
+                    // We're on the definition itself
+                    return Some(DefinitionLocation {
+                        range: self.node_range(parent),
+                        selection_range: self.node_range(node),
+                    });
                 }
                 _ => {}
             }
