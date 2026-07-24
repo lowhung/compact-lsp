@@ -29,13 +29,18 @@ Language Server Protocol implementation for the [Compact](https://docs.midnight.
 
 ### Cross-Project Support
 
-Works with Compact's import system:
+Works with Compact's import system across every workspace folder:
 
 ```compact
 import "./Utils" prefix Utils_;
 
 Utils_add(5, 5);  // Completion, hover, go-to-def, find refs, rename, signature help all work
 ```
+
+The server indexes workspace files without blocking editor requests and
+registers a `**/*.compact` file watcher when the client supports it. Creating,
+changing, or deleting an imported file updates completion and navigation
+without restarting the language server.
 
 ### Missing Things
 

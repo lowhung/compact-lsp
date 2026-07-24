@@ -174,7 +174,7 @@ sleep 30
                 .await
         });
 
-        let pid = timeout(Duration::from_secs(5), async {
+        let pid = match timeout(Duration::from_secs(5), async {
             loop {
                 if let Ok(pid) = fs::read_to_string(&pid_file) {
                     if !pid.trim().is_empty() {
@@ -185,7 +185,14 @@ sleep 30
             }
         })
         .await
-        .expect("mock compiler did not start");
+        {
+            Ok(pid) => pid,
+            Err(_) => {
+                task.abort();
+                let _ = task.await;
+                panic!("mock compiler did not start");
+            }
+        };
 
         task.abort();
         let _ = task.await;
