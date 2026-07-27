@@ -21,9 +21,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A conservative extract-local-value refactor delivered as a previewable
   workspace edit.
 - Manual Marketplace and Open VSX publication from the verified release VSIX.
+- A hermetic `cargo smoke` command for testing the real stdio server from a
+  fresh clone without a Compact toolchain or editor.
 
 ### Changed
 
+- Corrected the documented minimum supported Rust version to 1.85, matching
+  the locked `tower-lsp-server` dependency.
 - Pinned the maintained Compact tree-sitter grammar and added 0.33 fixtures.
 - Made document synchronization, UTF-16 positions, and file URI handling
   protocol-correct.

@@ -21,7 +21,7 @@ repository = "https://github.com/lowhung/compact-lsp"
 homepage = "https://github.com/lowhung/compact-lsp"
 keywords = ["lsp", "language-server", "compact", "smart-contracts", "midnight"]
 categories = ["development-tools", "text-editors"]
-rust-version = "1.70"
+rust-version = "1.85"
 
 # Shared dependencies - crates can use these with `.workspace = true`
 # This ensures all crates use the same versions, avoiding conflicts.

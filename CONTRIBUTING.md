@@ -13,7 +13,7 @@ environment expected by the project.
 
 ### Prerequisites
 
-- Rust 1.70+ (install via [rustup](https://rustup.rs/)).
+- Rust 1.85+ (install via [rustup](https://rustup.rs/)).
 - The `compact` CLI with toolchain 0.33 for compiler-backed integration tests.
 - Node.js 20 when changing the VS Code extension.
 
@@ -24,6 +24,17 @@ cargo build --workspace --locked
 ```
 
 ### Running Tests
+
+Run the focused, hermetic process smoke first:
+
+```bash
+cargo smoke
+```
+
+It launches the real stdio server and exercises the checked-in Compact
+workspace without requiring a Compact compiler or editor.
+
+Run the complete Rust suite before opening a pull request:
 
 ```bash
 cargo test --workspace --all-targets --all-features --locked
@@ -36,6 +47,9 @@ COMPACT_LSP_TEST_COMPILER=/path/to/compactc \
   cargo test -p compact-analyzer --test toolchain_runner \
   validates_fixture_with_real_compact_0_33_compiler -- --ignored
 ```
+
+See [Local testing](docs/local-testing.md) for what each test tier proves and
+for repeatable local editor smoke commands.
 
 For extension changes:
 

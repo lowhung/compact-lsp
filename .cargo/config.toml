@@ -1,0 +1,2 @@
+[alias]
+smoke = "test -p compact-lsp --test quickstart_smoke --locked -- --nocapture"
