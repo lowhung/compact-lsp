@@ -127,7 +127,7 @@ impl ParserEngine {
             && !node.is_missing()
             && node
                 .parent()
-                .map_or(true, |parent| parent.kind() != "member_access_expr")
+                .is_none_or(|parent| parent.kind() != "member_access_expr")
         {
             if let Some(name_node) = self.call_function_name_node(node) {
                 calls.push(CircuitCall {

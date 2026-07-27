@@ -666,7 +666,7 @@ fn duration_percentile(values: &[Duration], percentile: usize) -> Option<Duratio
     }
     let mut sorted = values.to_vec();
     sorted.sort_unstable();
-    let rank = (sorted.len() * percentile + 99) / 100;
+    let rank = (sorted.len() * percentile).div_ceil(100);
     Some(sorted[rank.saturating_sub(1).min(sorted.len() - 1)])
 }
 

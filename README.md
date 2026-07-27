@@ -3,7 +3,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE-APACHE)
 [![CI](https://github.com/lowhung/compact-lsp/actions/workflows/ci.yml/badge.svg)](https://github.com/lowhung/compact-lsp/actions/workflows/ci.yml)
-[![Rust](https://img.shields.io/badge/rust-1.70%2B-orange.svg)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.85%2B-orange.svg)](https://www.rust-lang.org)
 
 This project extends the Midnight Network with additional developer tooling.
 
@@ -94,8 +94,31 @@ contract, editor workflow, and evaluated follow-up transformations.
 
 ## Requirements
 
-- The `compact` CLI with a Compact 0.33 toolchain (recommended)
+- Building and testing: Rust 1.85 or newer, preferably through `rustup`
+- Compiler-backed diagnostics and formatting: the `compact` CLI with a Compact
+  0.33 toolchain (recommended)
 - A direct `compactc` and `format-compact` installation is also supported
+
+## Try it from a clone
+
+The hermetic smoke test needs only a Rust toolchain installed through
+[`rustup`](https://rustup.rs/):
+
+```bash
+git clone https://github.com/lowhung/compact-lsp.git
+cd compact-lsp
+cargo smoke
+```
+
+`cargo smoke` starts the exact `compact-lsp` test binary over stdio and checks
+initialization, imported completion, workspace symbols, hover, definition,
+document symbols, semantic tokens, syntax diagnostics, a safe quick fix, and
+clean shutdown against the checked-in Compact workspace.
+
+It deliberately does not use an installed Compact compiler, editor, Node.js,
+or published release. See [Local testing](docs/local-testing.md) for the full
+Rust suite, real Compact 0.33 compiler validation, and local Zed, VS Code, and
+Neovim workflows.
 
 ## Installation
 
@@ -136,6 +159,9 @@ cargo build --workspace --release --locked
 Binary: `target/release/compact-lsp`
 
 Confirm which server an editor will launch with `compact-lsp --version`.
+
+Run `cargo smoke` for a focused process-level check or follow
+[Local testing](docs/local-testing.md) for the complete validation tiers.
 
 For generated-workspace measurements and the CI responsiveness guard, see
 [Performance validation](docs/performance.md).
